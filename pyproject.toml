@@ -1,0 +1,74 @@
+[project]
+name = "compyutinator-keyboard"
+version = "0.1.0"
+description = "Keyboard configuration tool with KMonad management, voice transcription, and MIDI keyboard emulation"
+authors = [
+    { name = "instancer-kirik", email = "106033356+instancer-kirik@users.noreply.github.com" }
+]
+license = { text = "GPL-3.0-or-later" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.4.0",
+    "vosk>=0.3.45",
+    "pyaudio>=0.2.13",
+    "numpy>=1.24.0",
+    "pyautogui>=0.9.54",
+    "requests>=2.31.0",
+    "tqdm>=4.66.1",
+    "python-rtmidi>=1.5.0",
+    "mido>=1.3.0",
+]
+keywords = ["keyboard", "kmonad", "configuration", "transcription", "voice-to-text", "midi", "daw"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+    "Topic :: System :: Hardware",
+]
+
+[project.urls]
+Homepage = "https://github.com/instancer-kirik/compyutinator-keyboard"
+Repository = "https://github.com/instancer-kirik/compyutinator-keyboard"
+"Bug Tracker" = "https://github.com/instancer-kirik/compyutinator-keyboard/issues"
+
+[project.scripts]
+compyutinator-keyboard = "compyutinator_keyboard.keyboard_manager:main"
+compyutinator-transcriber = "compyutinator_transcriber.transcriber:main"
+
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+packages = [
+    "compyutinator_keyboard",
+    "compyutinator_transcriber",
+    "compyutinator_common",
+]
+artifacts = [
+    "compyutinator_transcriber/models/**/*",
+    "share/applications/*.desktop",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "B", "I", "UP", "N", "PL", "W", "RUF"]
+
+[tool.ruff.isort]
+known-first-party = ["compyutinator_keyboard", "compyutinator_transcriber", "compyutinator_common"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+  
