@@ -245,63 +245,95 @@ class MIDIKeyboard(QObject):
             else:
                 # Create virtual port with PipeWire-compatible name
                 try:
+                    logger.info("Creating virtual MIDI port...")
                     self.midi_out = mido.open_output(
                         'Compyutinator:midi_out',
                         virtual=True,
                         client_name='Compyutinator'
                     )
+                    logger.info("Virtual MIDI port created successfully")
                     
                     # Try to automatically connect using pw-link
                     try:
                         import subprocess
+                        logger.info("Attempting to connect using pw-link...")
                         
-                        # List MIDI ports
-                        result = subprocess.run(['pw-link', '-l'], capture_output=True, text=True)
-                        logger.info(f"Available PipeWire links:\n{result.stdout}")
+                        # First get a list of all nodes
+                        logger.info("Running pw-cli list-nodes...")
+                        nodes = subprocess.run(['pw-cli', 'list-nodes'], capture_output=True, text=True)
+                        logger.info("=== PipeWire Nodes ===")
+                        logger.info(nodes.stdout)
                         
-                        # Look for our output and Reaper's input through Midi-Bridge
+                        # Then get all links
+                        logger.info("Running pw-link -io...")
+                        result = subprocess.run(['pw-link', '-io'], capture_output=True, text=True)
+                        logger.info("=== PipeWire Links ===")
+                        logger.info(result.stdout)
+                        
+                        # Also try listing just MIDI ports
+                        logger.info("Running pw-link -m...")
+                        midi_ports = subprocess.run(['pw-link', '-m'], capture_output=True, text=True)
+                        logger.info("=== MIDI Ports ===")
+                        logger.info(midi_ports.stdout)
+                        
                         compyutinator_out = None
-                        midi_bridge_in = None
+                        reaper_midi12_in = None
                         
                         for line in result.stdout.splitlines():
-                            if 'Compyutinator:midi_out' in line or 'Compyutinator:(capture_0)' in line:
-                                compyutinator_out = line.split()[0]
-                            elif 'Midi-Bridge' in line and ':in' in line.lower():
-                                midi_bridge_in = line.split()[0]
-                        
-                        if compyutinator_out and midi_bridge_in:
-                            # Try to connect
-                            subprocess.run(['pw-link', compyutinator_out, midi_bridge_in])
-                            logger.info(f"Auto-connected MIDI: {compyutinator_out} -> {midi_bridge_in}")
-                        else:
-                            # Fallback to aconnect
-                            result = subprocess.run(['aconnect', '-l'], capture_output=True, text=True)
-                            reaper_port = None
-                            compyutinator_port = None
-                            for line in result.stdout.splitlines():
-                                if 'reaper' in line.lower():
-                                    reaper_port = line.split("'")[0].strip().split()[0]
-                                elif 'compyutinator' in line.lower():
-                                    compyutinator_port = line.split("'")[0].strip().split()[0]
+                            logger.info(f"Checking line: {line}")
                             
-                            if reaper_port and compyutinator_port:
-                                subprocess.run(['aconnect', compyutinator_port, reaper_port])
-                                logger.info("Auto-connected using aconnect")
-                            else:
-                                # Show manual connection instructions
-                                logger.info(
-                                    "Created virtual MIDI port\n"
-                                    "To connect in QjackCtl:\n"
-                                    "1. Install: sudo pacman -S pw-jack qjackctl\n"
-                                    "2. Open QjackCtl (aka Jack Audio Connection Kit)\n"
-                                    "3. Click the 'Graph' button (looks like a circuit diagram)\n"
-                                    "4. Find 'Compyutinator' on the left, and 'Reaper' or 'PipeWire MIDI' on the right\n"
-                                    "5. Click and drag, match colors\n"
-                                    "6. The connection should show as a line between them\n"
-                                    "7. In Reaper, go to Options > Preferences > MIDI Devices and enable MIDI port 12 input (2? checkboxes)"
+                            # Look for any line containing our keywords
+                            if any(x in line for x in ['Compyutinator', 'MIDI', 'Reaper', 'capture', 'Midi-Bridge']):
+                                logger.info(f"Found relevant port: {line}")
+                                
+                                # Look for Compyutinator output in Midi-Bridge
+                                if 'Midi-Bridge' in line and 'Compyutinator' in line and ('capture' in line.lower() or 'out' in line.lower()):
+                                    compyutinator_out = line.split()[0]
+                                    logger.info(f"Found Compyutinator output: {line} -> {compyutinator_out}")
+                                
+                                # Look for Reaper MIDI Input 12
+                                if any(x in line for x in ['REAPER', 'Reaper']) and any(x in line for x in ['MIDI Input 12', 'MIDI 12', 'midi12']):
+                                    reaper_midi12_in = line.split()[0]
+                                    logger.info(f"Found Reaper MIDI Input 12: {line} -> {reaper_midi12_in}")
+                        
+                        logger.info(f"Found Compyutinator out: {compyutinator_out}")
+                        logger.info(f"Found Reaper MIDI Input 12: {reaper_midi12_in}")
+                        
+                        # Try to connect
+                        if compyutinator_out and reaper_midi12_in:
+                            try:
+                                logger.info(f"Attempting connection: {compyutinator_out} -> {reaper_midi12_in}")
+                                result = subprocess.run(
+                                    ['pw-link', compyutinator_out, reaper_midi12_in], 
+                                    check=True, 
+                                    capture_output=True, 
+                                    text=True
                                 )
+                                logger.info(f"Successfully connected: {compyutinator_out} -> {reaper_midi12_in}")
+                                logger.info(f"Connection output: {result.stdout}")
+                            except subprocess.CalledProcessError as e:
+                                logger.warning(f"Failed to connect {compyutinator_out} -> {reaper_midi12_in}")
+                                logger.warning(f"Error output: {e.output}")
+                                logger.warning(f"Error stderr: {e.stderr}")
+                                # Try running pw-link with -v for verbose output
+                                try:
+                                    verbose = subprocess.run(['pw-link', '-v', compyutinator_out, reaper_midi12_in], 
+                                                      capture_output=True, text=True)
+                                    logger.warning(f"Verbose connection attempt output: {verbose.stdout}")
+                                    logger.warning(f"Verbose connection attempt error: {verbose.stderr}")
+                                except:
+                                    pass
+                        else:
+                            logger.warning("Could not find required ports")
+                            if not compyutinator_out:
+                                logger.warning("Missing Compyutinator output in Midi-Bridge")
+                            if not reaper_midi12_in:
+                                logger.warning("Missing Reaper MIDI Input 12")
                     except Exception as e:
                         logger.warning(f"Could not auto-connect: {e}")
+                        logger.warning(f"Exception details: {str(e)}")
+                        import traceback
+                        logger.warning(f"Traceback: {traceback.format_exc()}")
                     
                 except Exception as e:
                     error_msg = (
