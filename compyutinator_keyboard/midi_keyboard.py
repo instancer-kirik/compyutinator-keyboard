@@ -237,22 +237,80 @@ class MIDIKeyboard(QObject):
             available_ports = mido.get_output_names()
             logger.info(f"Available MIDI ports: {available_ports}")
             
-            # Try to create virtual port on Linux
-            try:
-                self.midi_out = mido.open_output(
-                    self.port_name,
-                    virtual=True,
-                    client_name='Compyutinator'
-                )
-                logger.info(f"Created virtual MIDI port: {self.port_name}")
-            except Exception as e:
-                error_msg = (
-                    f"Could not create virtual MIDI port. Error: {e}\n"
-                    f"Available ports are:\n{available_ports}\n"
-                    "Make sure you have ALSA MIDI support installed:\n"
-                    "sudo pacman -S alsa-utils"
-                )
-                raise RuntimeError(error_msg)
+            # First try to connect to PipeWire MIDI
+            pipewire_ports = [p for p in available_ports if 'pipewire' in p.lower()]
+            if pipewire_ports:
+                self.midi_out = mido.open_output(pipewire_ports[0])
+                logger.info(f"Connected to PipeWire MIDI port: {pipewire_ports[0]}")
+            else:
+                # Create virtual port with PipeWire-compatible name
+                try:
+                    self.midi_out = mido.open_output(
+                        'Compyutinator:midi_out',
+                        virtual=True,
+                        client_name='Compyutinator'
+                    )
+                    
+                    # Try to automatically connect using pw-link
+                    try:
+                        import subprocess
+                        
+                        # List MIDI ports
+                        result = subprocess.run(['pw-link', '-l'], capture_output=True, text=True)
+                        logger.info(f"Available PipeWire links:\n{result.stdout}")
+                        
+                        # Look for our output and Reaper's input through Midi-Bridge
+                        compyutinator_out = None
+                        midi_bridge_in = None
+                        
+                        for line in result.stdout.splitlines():
+                            if 'Compyutinator:midi_out' in line or 'Compyutinator:(capture_0)' in line:
+                                compyutinator_out = line.split()[0]
+                            elif 'Midi-Bridge' in line and ':in' in line.lower():
+                                midi_bridge_in = line.split()[0]
+                        
+                        if compyutinator_out and midi_bridge_in:
+                            # Try to connect
+                            subprocess.run(['pw-link', compyutinator_out, midi_bridge_in])
+                            logger.info(f"Auto-connected MIDI: {compyutinator_out} -> {midi_bridge_in}")
+                        else:
+                            # Fallback to aconnect
+                            result = subprocess.run(['aconnect', '-l'], capture_output=True, text=True)
+                            reaper_port = None
+                            compyutinator_port = None
+                            for line in result.stdout.splitlines():
+                                if 'reaper' in line.lower():
+                                    reaper_port = line.split("'")[0].strip().split()[0]
+                                elif 'compyutinator' in line.lower():
+                                    compyutinator_port = line.split("'")[0].strip().split()[0]
+                            
+                            if reaper_port and compyutinator_port:
+                                subprocess.run(['aconnect', compyutinator_port, reaper_port])
+                                logger.info("Auto-connected using aconnect")
+                            else:
+                                # Show manual connection instructions
+                                logger.info(
+                                    "Created virtual MIDI port\n"
+                                    "To connect in QjackCtl:\n"
+                                    "1. Install: sudo pacman -S pw-jack qjackctl\n"
+                                    "2. Open QjackCtl (aka Jack Audio Connection Kit)\n"
+                                    "3. Click the 'Graph' button (looks like a circuit diagram)\n"
+                                    "4. Find 'Compyutinator' on the left, and 'Reaper' or 'PipeWire MIDI' on the right\n"
+                                    "5. Click and drag, match colors\n"
+                                    "6. The connection should show as a line between them\n"
+                                    "7. In Reaper, go to Options > Preferences > MIDI Devices and enable MIDI port 12 input (2? checkboxes)"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not auto-connect: {e}")
+                    
+                except Exception as e:
+                    error_msg = (
+                        f"Could not create MIDI port. Error: {e}\n"
+                        f"Available ports are:\n{available_ports}\n"
+                        "Make sure you have PipeWire MIDI support:\n"
+                        "sudo pacman -S pipewire-alsa pipewire-jack qjackctl"
+                    )
+                    raise RuntimeError(error_msg)
             
             # Send test message
             self.midi_out.send(mido.Message('note_on', note=60, velocity=1))

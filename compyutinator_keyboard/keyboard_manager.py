@@ -27,7 +27,7 @@ from PyQt6.QtCore import (
     QPoint, 
     QMimeData
 )
-from PyQt6.QtGui import QDrag, QPixmap, QPainter, QTextCursor
+from PyQt6.QtGui import QDrag, QPixmap, QPainter, QTextCursor, QIcon, QColor
 from PyQt6.QtNetwork import QLocalSocket, QLocalServer
 from PyQt6.QtWidgets import (
     QApplication, 
@@ -47,7 +47,8 @@ from PyQt6.QtWidgets import (
     QWizardPage, 
     QProgressBar, 
     QSizePolicy,
-    QTabWidget
+    QTabWidget,
+    QSystemTrayIcon
 )
 
 # Fix imports to work both as module and directly
@@ -60,6 +61,21 @@ except ImportError:
     from midi_keyboard import MIDIKeyboard
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from compyutinator_common import setup_qt_app
+
+# Add this constant near the top of the file
+KEYBOARD_ICON_SVG = """
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <rect x="8" y="16" width="48" height="32" rx="4" fill="none" stroke="currentColor" stroke-width="4"/>
+    <rect x="16" y="24" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="24" y="24" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="32" y="24" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="40" y="24" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="16" y="32" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="24" y="32" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="32" y="32" width="6" height="6" rx="1" fill="currentColor"/>
+    <rect x="40" y="32" width="6" height="6" rx="1" fill="currentColor"/>
+</svg>
+"""
 
 class KeyboardManager(QMainWindow):
     def __init__(self):
@@ -347,6 +363,29 @@ class KeyboardManager(QMainWindow):
             self.midi_keyboard.cleanup()
         super().closeEvent(event)
 
+    def create_tray_icon(self):
+        """Create system tray icon and menu."""
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        # Create icon from SVG
+        icon = QIcon()
+        for state in [QIcon.Mode.Normal, QIcon.Mode.Disabled, QIcon.Mode.Active, QIcon.Mode.Selected]:
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if state == QIcon.Mode.Disabled:
+                painter.setPen(QColor(128, 128, 128))  # Gray for disabled
+            else:
+                painter.setPen(QColor(255, 255, 255))  # White for other states
+            painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, KEYBOARD_ICON_SVG)
+            painter.end()
+            icon.addPixmap(pixmap, state)
+        
+        self.tray_icon.setIcon(icon)
+        
+        # Rest of the create_tray_icon method remains the same...
+
 class SetupWizard(QWizard):
     """Setup wizard for first-time configuration."""
     
@@ -358,23 +397,33 @@ class SetupWizard(QWizard):
         self.addPage(self.create_intro_page())
         self.addPage(self.create_udev_page())
         self.addPage(self.create_permissions_page())
+        self.addPage(self.create_modules_page())
         self.addPage(self.create_finish_page())
+        
+        # Add progress bars
+        self.udev_progress = QProgressBar()
+        self.udev_progress.hide()
+        self.perm_progress = QProgressBar()
+        self.perm_progress.hide()
         
         # Set minimum size
         self.setMinimumSize(600, 400)
+        
+        # Allow skipping if already configured
+        self.setOption(QWizard.WizardOption.IndependentPages, True)
     
     def create_intro_page(self):
+        """Create introduction page."""
         page = QWizardPage()
-        page.setTitle("Welcome to Keyboard Manager")
+        page.setTitle("Welcome to Keyboard Manager Setup")
         layout = QVBoxLayout()
         
         label = QLabel(
-            "This wizard will help you set up the required permissions and configurations "
-            "for KMonad and MIDI keyboard functionality.\n\n"
-            "The following will be configured:\n"
+            "This wizard will help you set up your system for KMonad:\n\n"
             "• udev rules for keyboard access\n"
             "• User group permissions\n"
-            "• uinput module loading"
+            "• uinput module loading\n\n"
+            "You may need to enter your password for system changes."
         )
         label.setWordWrap(True)
         layout.addWidget(label)
@@ -383,12 +432,17 @@ class SetupWizard(QWizard):
         return page
     
     def create_udev_page(self):
+        """Create udev rules setup page."""
         page = QWizardPage()
         page.setTitle("udev Rules Setup")
         layout = QVBoxLayout()
         
+        # Add skip checkbox
+        self.skip_udev = QCheckBox("Skip (if already configured)")
+        layout.addWidget(self.skip_udev)
+        
         # Status label
-        self.udev_status = QLabel("Status: Not configured")
+        self.udev_status = QLabel("Checking current configuration...")
         layout.addWidget(self.udev_status)
         
         # Setup button
@@ -396,21 +450,32 @@ class SetupWizard(QWizard):
         self.udev_button.clicked.connect(self.setup_udev_rules)
         layout.addWidget(self.udev_button)
         
-        # Progress
-        self.udev_progress = QProgressBar()
-        self.udev_progress.hide()
+        # Progress bar
         layout.addWidget(self.udev_progress)
+        
+        # Check current config
+        if os.path.exists("/etc/udev/rules.d/99-kmonad-keyboards.rules"):
+            self.udev_status.setText("✓ udev rules already configured")
+            self.skip_udev.setChecked(True)
+            self.udev_button.setEnabled(False)
+        else:
+            self.udev_status.setText("udev rules need to be configured")
         
         page.setLayout(layout)
         return page
     
     def create_permissions_page(self):
+        """Create permissions setup page."""
         page = QWizardPage()
         page.setTitle("User Permissions Setup")
         layout = QVBoxLayout()
         
+        # Add skip checkbox
+        self.skip_perms = QCheckBox("Skip (if already configured)")
+        layout.addWidget(self.skip_perms)
+        
         # Status label
-        self.perm_status = QLabel("Status: Not configured")
+        self.perm_status = QLabel("Checking current configuration...")
         layout.addWidget(self.perm_status)
         
         # Setup button
@@ -418,15 +483,57 @@ class SetupWizard(QWizard):
         self.perm_button.clicked.connect(self.setup_permissions)
         layout.addWidget(self.perm_button)
         
-        # Progress
-        self.perm_progress = QProgressBar()
-        self.perm_progress.hide()
+        # Progress bar
         layout.addWidget(self.perm_progress)
+        
+        # Check current config
+        username = os.getenv('USER')
+        try:
+            groups = subprocess.check_output(['groups', username]).decode()
+            if 'input' in groups:
+                self.perm_status.setText("✓ User already in input group")
+                self.skip_perms.setChecked(True)
+                self.perm_button.setEnabled(False)
+            else:
+                self.perm_status.setText("User needs to be added to input group")
+        except:
+            self.perm_status.setText("Could not check group membership")
         
         page.setLayout(layout)
         return page
     
+    def create_modules_page(self):
+        """Create page for module loading."""
+        page = QWizardPage()
+        page.setTitle("Kernel Module Setup")
+        layout = QVBoxLayout()
+        
+        # Status label
+        self.module_status = QLabel("Checking modules...")
+        layout.addWidget(self.module_status)
+        
+        # Setup button
+        self.module_button = QPushButton("Load uinput Module")
+        self.module_button.clicked.connect(self.setup_modules)
+        layout.addWidget(self.module_button)
+        
+        # Check current status
+        try:
+            with open('/proc/modules') as f:
+                modules = f.read()
+                if 'uinput' in modules:
+                    self.module_status.setText("✓ uinput module already loaded")
+                    self.module_button.setEnabled(False)
+                else:
+                    self.module_status.setText("uinput module needs to be loaded")
+        except Exception as e:
+            self.module_status.setText(f"Error checking modules: {e}")
+        
+        page.setLayout(layout)
+        return page
+
     def create_finish_page(self):
+        """Create final setup page."""
         page = QWizardPage()
         page.setTitle("Setup Complete")
         layout = QVBoxLayout()
@@ -440,72 +547,150 @@ class SetupWizard(QWizard):
         label.setWordWrap(True)
         layout.addWidget(label)
         
+        # Add status summary
+        status = QLabel()
+        status_text = "Setup Status:\n"
+        
+        # Check udev rules
+        if os.path.exists('/etc/udev/rules.d/99-kmonad-keyboards.rules'):
+            status_text += "✓ udev rules configured\n"
+        else:
+            status_text += "✗ udev rules not found\n"
+        
+        # Check user groups
+        try:
+            groups = subprocess.check_output(['groups']).decode()
+            if 'input' in groups:
+                status_text += "✓ User in input group\n"
+            else:
+                status_text += "✗ User not in input group\n"
+        except:
+            status_text += "? Could not check groups\n"
+        
+        # Check uinput module
+        try:
+            with open('/proc/modules') as f:
+                if 'uinput' in f.read():
+                    status_text += "✓ uinput module loaded\n"
+                else:
+                    status_text += "✗ uinput module not loaded\n"
+        except:
+            status_text += "? Could not check modules\n"
+        
+        status.setText(status_text)
+        layout.addWidget(status)
+        
         page.setLayout(layout)
         return page
-    
+
+    def setup_modules(self):
+        """Set up required kernel modules."""
+        try:
+            # Load uinput module
+            subprocess.run(['pkexec', 'sh', '-c', '''
+                modprobe uinput
+                echo "uinput" > /etc/modules-load.d/uinput.conf
+                echo "# KMonad uinput module" > /etc/modules-load.d/kmonad.conf
+                echo "uinput" >> /etc/modules-load.d/kmonad.conf
+            '''], check=True)
+            
+            # Verify module is loaded
+            with open('/proc/modules') as f:
+                if 'uinput' in f.read():
+                    self.module_status.setText("✓ uinput module loaded successfully")
+                    self.module_button.setEnabled(False)
+                    return True
+                else:
+                    self.module_status.setText("Error: Module not loaded after setup")
+                    return False
+                    
+        except Exception as e:
+            self.module_status.setText(f"Error loading module: {e}")
+            return False
+
     def setup_udev_rules(self):
         """Set up udev rules for keyboard and uinput access."""
-        self.udev_button.setEnabled(False)
-        self.udev_progress.show()
-        self.udev_progress.setRange(0, 0)  # Indeterminate progress
-        
         try:
-            # Create udev rules
-            rules_content = """
-# KMonad keyboard access
+            # Create more comprehensive udev rules
+            rules_content = """# KMonad keyboard access
 KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
 KERNEL=="event*", NAME="input/%k", MODE="0660", GROUP="input"
+# Tag all keyboard devices
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="kmonad-keyboards"
 """
             # Use pkexec to write rules with elevated privileges
             with tempfile.NamedTemporaryFile(mode='w', suffix='.rules', delete=False) as temp:
                 temp.write(rules_content)
                 rules_path = temp.name
             
-            # Copy rules file to /etc/udev/rules.d/
             subprocess.run([
                 'pkexec', 'sh', '-c',
-                f'cp {rules_path} /etc/udev/rules.d/99-kmonad-keyboards.rules && '
-                'udevadm control --reload-rules && '
-                'udevadm trigger'
+                f'''
+                cp {rules_path} /etc/udev/rules.d/99-kmonad-keyboards.rules
+                udevadm control --reload-rules
+                udevadm trigger
+                '''
             ], check=True)
             
-            os.unlink(rules_path)
-            
-            self.udev_status.setText("Status: ✓ udev rules configured successfully")
-            self.udev_progress.hide()
-            return True
-            
+            # Verify rules were created
+            if os.path.exists('/etc/udev/rules.d/99-kmonad-keyboards.rules'):
+                self.udev_status.setText("✓ udev rules configured successfully")
+                return True
+            else:
+                self.udev_status.setText("Error: Rules file not created")
+                return False
+                
         except Exception as e:
-            self.udev_status.setText(f"Status: ✗ Error configuring udev rules: {str(e)}")
-            self.udev_progress.hide()
-            self.udev_button.setEnabled(True)
+            self.udev_status.setText(f"Error configuring udev rules: {e}")
             return False
-    
+
     def setup_permissions(self):
         """Set up user permissions and groups."""
-        self.perm_button.setEnabled(False)
-        self.perm_progress.show()
-        self.perm_progress.setRange(0, 0)
-        
         try:
-            # Add user to required groups
             username = os.getenv('USER')
             subprocess.run([
                 'pkexec', 'sh', '-c',
-                f'usermod -aG input {username} && '
-                'modprobe uinput && '
-                'echo "uinput" > /etc/modules-load.d/uinput.conf'
+                f'''
+                # Add user to input group
+                usermod -aG input {username}
+                
+                # Ensure /dev/uinput has correct permissions
+                chgrp input /dev/uinput
+                chmod g+rw /dev/uinput
+                '''
             ], check=True)
             
-            self.perm_status.setText("Status: ✓ Permissions configured successfully")
-            self.perm_progress.hide()
-            return True
-            
+            # Verify group membership
+            groups = subprocess.check_output(['groups', username]).decode()
+            if 'input' in groups:
+                self.perm_status.setText("✓ Permissions configured successfully")
+                return True
+            else:
+                self.perm_status.setText("Error: User not added to input group")
+                return False
+                
         except Exception as e:
-            self.perm_status.setText(f"Status: ✗ Error configuring permissions: {str(e)}")
-            self.perm_progress.hide()
-            self.perm_button.setEnabled(True)
+            self.perm_status.setText(f"Error configuring permissions: {e}")
             return False
+
+    def validateCurrentPage(self):
+        """Validate each page before proceeding."""
+        current_page = self.currentPage()
+        
+        if "udev" in current_page.title().lower():
+            if not self.skip_udev.isChecked():
+                return self.setup_udev_rules()
+                
+        elif "permission" in current_page.title().lower():
+            if not self.skip_perms.isChecked():
+                return self.setup_permissions()
+                
+        elif "module" in current_page.title().lower():
+            with open('/proc/modules') as f:
+                if 'uinput' not in f.read():
+                    return self.setup_modules()
+                    
+        return True
 
 def main():
     """Run the keyboard manager application."""

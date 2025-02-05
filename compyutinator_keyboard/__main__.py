@@ -14,6 +14,7 @@ from compyutinator_common import setup_qt_app
 
 def signal_handler(signum, frame):
     """Handle interrupt signals."""
+    print("\nReceived interrupt signal. Cleaning up...")
     QApplication.quit()
 
 def main():
@@ -23,7 +24,7 @@ def main():
     parser.add_argument('--auto-start', '-a', action='store_true', help='Automatically start KMonad')
     args = parser.parse_args()
 
-    # Set up signal handling
+    # Set up signal handling before creating QApplication
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -32,7 +33,7 @@ def main():
     # Create a timer to process signals
     timer = QTimer()
     timer.timeout.connect(lambda: None)  # Let Python process signals
-    timer.start(100)  # Check every 100ms
+    timer.start(50)  # Check more frequently (every 50ms)
     
     manager = KeyboardManager()
     

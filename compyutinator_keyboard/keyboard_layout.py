@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QTextEdit, QCheckBox, QFileDialog, QSystemTrayIcon, QMenu, QMessageBox
 )
 from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve, QMimeData, QTimer
-from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QDrag, QIcon
+from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QDrag, QIcon, QTextCursor
 import os
 import re
 import subprocess
@@ -23,14 +23,95 @@ class KeyboardLayout(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setSpacing(4)
         self.layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Add output box first so it's available for messages
+        self.output_box = QTextEdit()
+        self.output_box.setReadOnly(True)
+        self.output_box.setMinimumHeight(100)
+        self.output_box.setStyleSheet("""
+            QTextEdit {
+                background-color: #2a2a2a;
+                color: #ff6b6b;
+                border: 1px solid #ff6b6b;
+                border-radius: 4px;
+                padding: 8px;
+                font-family: monospace;
+            }
+        """)
+        
+        # Add device selection
+        device_layout = QHBoxLayout()
+        device_label = QLabel("Keyboard Device:")
+        self.device_combo = QComboBox()
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_devices)
+        
+        device_layout.addWidget(device_label)
+        device_layout.addWidget(self.device_combo)
+        device_layout.addWidget(refresh_button)
+        self.layout.addLayout(device_layout)
+        
+        # Add config editor
+        self.config_edit = QTextEdit()
+        self.config_edit.setMinimumHeight(200)
+        self.layout.addWidget(self.config_edit)
+        
+        # Add control buttons
+        button_layout = QHBoxLayout()
+        
+        self.start_button = QPushButton("Start KMonad")
+        self.start_button.clicked.connect(self.toggle_kmonad)
+        
+        debug_button = QPushButton("Debug in Terminal")
+        debug_button.clicked.connect(self.debug_in_terminal)
+        
+        kill_button = QPushButton("Kill All KMonad")
+        kill_button.clicked.connect(self.kill_all_kmonad)
+        
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(debug_button)
+        button_layout.addWidget(kill_button)
+        
+        # Add minimize checkbox
+        self.minimize_to_tray = QCheckBox("Minimize to Tray")
+        self.minimize_to_tray.setChecked(True)
+        button_layout.addWidget(self.minimize_to_tray)
+        
+        self.layout.addLayout(button_layout)
+        
+        # Add output box at bottom
+        self.layout.addWidget(self.output_box)
+        
+        # Initialize after UI is ready
+        self.kmonad_process = None
+        self.refresh_devices()
+        self.load_default_config()
+        
+        # Create warning label first
+        self.warning_label = QLabel(self)
+        self.warning_label.setStyleSheet("""
+            QLabel {
+                color: #ff6b6b;
+                background-color: #2a2a2a;
+                border: 1px solid #ff6b6b;
+                border-radius: 4px;
+                padding: 8px;
+                margin: 4px;
+            }
+        """)
+        self.warning_label.hide()
+        # Add warning label to top of layout
+        self.layout.insertWidget(0, self.warning_label)
+        
+        # Initialize other attributes
         self.dragging = False
         self.drag_source = None
         self.drag_source_row = None
         self.active_row = None
-        self.row_states = {}  # Store current state of each row
+        self.row_states = {}
         self.setAcceptDrops(True)
         
-        # Define default layouts first
+        # Define default layouts
         self.default_layout = {
             "Function": ["esc", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12"],
             "Number": ["grv", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "mins", "eql", "bspc"],
@@ -39,17 +120,6 @@ class KeyboardLayout(QWidget):
             "Shift": ["lsft", "z", "x", "c", "v", "b", "n", "m", "comm", "dot", "slsh", "rsft"],
             "Control": ["lctl", "lmet", "lalt", "spc", "ralt", "rmet", "menu", "rctl"]
         }
-        
-        # Add device selection
-        self.device_combo = QComboBox()
-        self.refresh_button = QPushButton("Refresh Devices")
-        self.refresh_button.clicked.connect(self.refresh_devices)
-        
-        device_layout = QHBoxLayout()
-        device_layout.addWidget(QLabel("Keyboard Device:"))
-        device_layout.addWidget(self.device_combo)
-        device_layout.addWidget(self.refresh_button)
-        self.layout.addLayout(device_layout)
         
         # Add layout selector
         layout_selector = QHBoxLayout()
@@ -63,38 +133,6 @@ class KeyboardLayout(QWidget):
         # Now create keyboard layout
         self.create_keyboard_layout()
         
-        # Add KMonad config view
-        self.config_edit = QTextEdit()
-        self.config_edit.setMinimumHeight(200)
-        self.layout.addWidget(self.config_edit)
-        
-        # Add controls
-        controls_layout = QHBoxLayout()
-        
-        self.offset_toggle = QCheckBox("Offset Layout")
-        self.offset_toggle.stateChanged.connect(self.update_layout)
-        controls_layout.addWidget(self.offset_toggle)
-        
-        self.load_button = QPushButton("Load Config")
-        self.save_button = QPushButton("Save Config")
-        self.load_button.clicked.connect(self.load_config)
-        self.save_button.clicked.connect(self.save_config)
-        
-        controls_layout.addWidget(self.load_button)
-        controls_layout.addWidget(self.save_button)
-        
-        # Add KMonad process management
-        self.kmonad_process = None
-        self.start_button = QPushButton("Start KMonad")
-        self.start_button.clicked.connect(self.toggle_kmonad)
-        controls_layout.addWidget(self.start_button)
-        
-        self.layout.addLayout(controls_layout)
-        
-        # Initialize
-        self.refresh_devices()
-        self.device_combo.currentTextChanged.connect(self.update_config)
-
         # Add special key functions
         self.special_keys = {
             "caps": "(tap-hold 200 esc lctl)",  # Caps is Esc when tapped, Ctrl when held
@@ -107,11 +145,6 @@ class KeyboardLayout(QWidget):
 
         # Add system tray
         self.create_tray_icon()
-        
-        # Add minimize to tray option
-        self.minimize_to_tray = QCheckBox("Minimize to Tray")
-        self.minimize_to_tray.setChecked(True)
-        controls_layout.addWidget(self.minimize_to_tray)
 
         # Add predefined layouts
         self.layouts = {
@@ -177,125 +210,239 @@ class KeyboardLayout(QWidget):
             "Control": 15  # Small offset
         }
 
-        # Improve warning label
-        self.warning_label = QLabel(self)
-        self.warning_label.setStyleSheet("""
-            QLabel {
-                color: #ff6b6b;
-                background-color: #2a2a2a;
-                border: 1px solid #ff6b6b;
-                border-radius: 4px;
-                padding: 8px;
-                margin: 4px;
-            }
-        """)
-        self.warning_label.hide()
-        # Add warning label to top of layout
-        self.layout.insertWidget(0, self.warning_label)
-
     def show_warning(self, message, timeout=5000):
-        """Show warning message and hide after timeout."""
-        self.warning_label.setText(message)
-        self.warning_label.show()
-        # Hide after timeout
-        QTimer.singleShot(timeout, self.warning_label.hide)
+        """Show warning message in output box."""
+        from datetime import datetime
+        current = self.output_box.toPlainText()
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        new_message = f"[{timestamp}] {message}"
+        
+        if current:
+            new_message = current + "\n" + new_message
+        
+        self.output_box.setText(new_message)
+        self.output_box.moveCursor(QTextCursor.MoveOperation.End)
+
+    def toggle_warning_size(self):
+        """Toggle between normal and expanded warning size."""
+        if self.warning_expanded:
+            self.warning_text.setMinimumHeight(150)
+            self.warning_text.setMaximumHeight(150)
+            self.expand_button.setText("▼")
+        else:
+            self.warning_text.setMinimumHeight(400)
+            self.warning_text.setMaximumHeight(800)
+            self.expand_button.setText("▲")
+        self.warning_expanded = not self.warning_expanded
+
+    def debug_in_terminal(self):
+        """Run KMonad in terminal with debug output."""
+        try:
+            # Save current config to temp file
+            config_file = os.path.join(tempfile.gettempdir(), "kmonad_debug.kbd")
+            with open(config_file, 'w') as f:
+                f.write(self.config_edit.toPlainText())
+            
+            # Create debug script with more verbose output
+            debug_script = f"""#!/bin/bash
+set -x  # Show commands being executed
+
+echo "=== Current User and Groups ==="
+id
+echo
+
+echo "=== Device Permissions ==="
+ls -l /dev/input/event*
+echo
+
+echo "=== Input Device Details ==="
+cat /proc/bus/input/devices
+echo
+
+echo "=== Config File Contents ==="
+cat {config_file}
+echo
+
+echo "=== Testing KMonad ==="
+kmonad -d {config_file} 2>&1  # Capture both stdout and stderr
+echo
+
+echo "Press Enter to close..."
+read
+"""
+            script_path = os.path.join(tempfile.gettempdir(), "kmonad_debug.sh")
+            with open(script_path, 'w') as f:
+                f.write(debug_script)
+            os.chmod(script_path, 0o755)
+
+            # Try to launch terminal more aggressively
+            terminal_cmds = [
+                ["konsole", "-e", f"bash {script_path}"],
+                ["gnome-terminal", "--", "bash", script_path],
+                ["xterm", "-e", f"bash {script_path}"],
+                ["alacritty", "-e", f"bash {script_path}"]
+            ]
+
+            for cmd in terminal_cmds:
+                try:
+                    subprocess.Popen(cmd)
+                    self.show_warning(f"Launched debug in {cmd[0]}", 5000)
+                    return
+                except FileNotFoundError:
+                    continue
+
+            self.show_warning(
+                "No terminal found. Install one of:\n"
+                "- konsole\n"
+                "- gnome-terminal\n"
+                "- xterm\n"
+                "- alacritty",
+                10000
+            )
+
+        except Exception as e:
+            self.show_warning(
+                f"Error launching debug: {str(e)}\n"
+                "Try running manually:\n"
+                f"bash {script_path}",
+                30000
+            )
 
     def refresh_devices(self):
         """Refresh the list of available keyboard devices."""
         self.device_combo.clear()
         try:
-            # Get all input devices
             devices = []
             
-            # Try by-id first (most reliable)
-            try:
-                for device in os.listdir('/dev/input/by-id'):
-                    if '-kbd' in device or 'keyboard' in device.lower():
-                        full_path = f"/dev/input/by-id/{device}"
-                        devices.append(full_path)
-            except (FileNotFoundError, PermissionError):
-                pass
+            # Try by-path firstnarst
+            by_path = "/dev/input/by-path"
+            if os.path.exists(by_path):
+                for device in os.listdir(by_path):
+                    if "kbd" in device.lower():
+                        full_path = os.path.join(by_path, device)
+                        real_path = os.path.realpath(full_path)
+                        if os.path.exists(real_path):
+                            # Get device name from /proc/bus/input/devices
+                            with open('/proc/bus/input/devices', 'r') as f:
+                                content = f.read()
+                                event_num = real_path.split('event')[-1]
+                                for block in content.split('\n\n'):
+                                    if f'event{event_num}' in block:
+                                        name = [line for line in block.split('\n') 
+                                               if line.startswith('N: Name=')]
+                                        if name:
+                                            name = name[0].split('"')[1]
+                                            devices.append((
+                                                full_path,  # Use by-path path
+                                                f"{name} ({full_path})",
+                                                'platform' in device
+                                            ))
 
-            # Then try by-path
-            try:
-                for device in os.listdir('/dev/input/by-path'):
-                    if '-kbd' in device or 'keyboard' in device.lower():
-                        full_path = f"/dev/input/by-path/{device}"
-                        if full_path not in devices:  # Avoid duplicates
-                            devices.append(full_path)
-            except (FileNotFoundError, PermissionError):
-                pass
+            # Also check by-id
+            by_id = "/dev/input/by-id"
+            if os.path.exists(by_id):
+                for device in os.listdir(by_id):
+                    if "kbd" in device.lower():
+                        full_path = os.path.join(by_id, device)
+                        real_path = os.path.realpath(full_path)
+                        if os.path.exists(real_path):
+                            # Get device name from /proc/bus/input/devices
+                            with open('/proc/bus/input/devices', 'r') as f:
+                                content = f.read()
+                                event_num = real_path.split('event')[-1]
+                                for block in content.split('\n\n'):
+                                    if f'event{event_num}' in block:
+                                        name = [line for line in block.split('\n') 
+                                               if line.startswith('N: Name=')]
+                                        if name:
+                                            name = name[0].split('"')[1]
+                                            devices.append((
+                                                full_path,  # Use by-id path
+                                                f"{name} ({full_path})",
+                                                False
+                                            ))
 
-            # Finally check event devices directly
-            try:
-                result = subprocess.run(
-                    ['grep', '-l', 'Handlers.*kbd', '/proc/bus/input/devices'],
-                    capture_output=True, text=True
-                )
-                if result.stdout:
-                    for line in result.stdout.splitlines():
-                        event_nums = re.findall(r'event(\d+)', line)
-                        for num in event_nums:
-                            path = f"/dev/input/event{num}"
-                            if os.path.exists(path) and path not in devices:
-                                devices.append(path)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pass
+            # Fallback to direct event devices if needed
+            if not devices:
+                with open('/proc/bus/input/devices', 'r') as f:
+                    content = f.read()
+                    for block in content.split('\n\n'):
+                        if 'kbd' in block.lower():
+                            name = [line for line in block.split('\n') 
+                                   if line.startswith('N: Name=')]
+                            handlers = [line for line in block.split('\n') 
+                                      if line.startswith('H: Handlers=')]
+                            if name and handlers:
+                                name = name[0].split('"')[1]
+                                for handler in handlers[0].split('=')[1].split():
+                                    if handler.startswith('event'):
+                                        path = f"/dev/input/{handler}"
+                                        devices.append((
+                                            path,
+                                            f"{name} ({path})",
+                                            False
+                                        ))
 
             if devices:
-                for device in devices:
-                    self.device_combo.addItem(device)
+                # Sort devices - platform keyboards first, then alphabetically
+                devices.sort(key=lambda x: (not x[2], x[1]))
+                
+                # Add devices to combo box
+                for path, description, _ in devices:
+                    self.device_combo.addItem(description, path)
+                
+                # Select first device (should be main keyboard)
+                self.device_combo.setCurrentIndex(0)
+                
+                self.show_warning(
+                    f"Found {len(devices)} keyboard devices\n"
+                    f"Selected: {self.device_combo.currentText()}",
+                    5000
+                )
             else:
-                self.show_warning("No keyboard devices found. Try running with sudo.")
+                self.show_warning("No keyboard devices found", 10000)
                 self.device_combo.addItem("No keyboard devices found")
 
         except Exception as e:
-            self.show_warning(f"Error accessing keyboard devices: {str(e)}")
+            self.show_warning(f"Error accessing keyboard devices: {str(e)}", 10000)
             self.device_combo.addItem("Error accessing devices")
 
     def update_config(self):
         """Update KMonad config with current layout and device."""
-        device = self.device_combo.currentText()
-        if not device or device.startswith("No ") or device.startswith("Error"):
+        device = self.device_combo.currentData()  # Get the raw device path
+        if not device:
+            self.show_warning("No keyboard device selected", 5000)
             return
-        
-        # First ensure the layout exists
-        if not hasattr(self, 'default_layout') or not self.default_layout:
-            # Use the default QWERTY layout if none is set
-            self.default_layout = self.layouts["QWERTY"]
-            self.create_keyboard_layout()
 
-        try:
-            config = f"""
-(defcfg
-  ;; Use the actual selected device path
+        config = f"""(defcfg
   input  (device-file "{device}")
-  output (uinput-sink "My KMonad output")
+  output (uinput-sink "KMonad: Compyutinator")
   fallthrough true
   allow-cmd true
 )
 
-;; Define modmap to ensure base layout is QWERTY
 (defsrc
-  {self.generate_layout_config(use_default=True)}
+  esc  f1   f2   f3   f4   f5   f6   f7   f8   f9   f10  f11  f12
+  grv  1    2    3    4    5    6    7    8    9    0    -    =    bspc
+  tab  q    w    e    r    t    y    u    i    o    p    [    ]    \\
+  caps a    s    d    f    g    h    j    k    l    ;    '    ret
+  lsft z    x    c    v    b    n    m    ,    .    /    rsft
+  lctl lmet lalt           spc            ralt rmet menu rctl
 )
 
-;; Define custom aliases for special key combinations
 (defalias
-  cap (tap-hold 200 esc lctl)  ;; Caps is Esc when tapped, Ctrl when held
-  spl (tap-hold-next 200 ( lsft)  ;; Left shift with opening parenthesis
-  spr (tap-hold-next 200 ) rsft)  ;; Right shift with closing parenthesis
+  cap (tap-hold 200 esc lctl)
 )
 
-;; Define the main layer
 (deflayer default
-  {self.generate_layout_config(use_special=True)}
-)
-"""
-            self.config_edit.setText(config)
-            
-        except Exception as e:
-            self.show_warning(f"Error updating config: {str(e)}")
+  esc  f1   f2   f3   f4   f5   f6   f7   f8   f9   f10  f11  f12
+  grv  1    2    3    4    5    6    7    8    9    0    -    =    bspc
+  tab  q    w    e    r    t    y    u    i    o    p    [    ]    \\
+  @cap a    s    d    f    g    h    j    k    l    ;    '    ret
+  lsft z    x    c    v    b    n    m    ,    .    /    rsft
+  lctl lmet lalt           spc            ralt rmet menu rctl
+)"""
+        self.config_edit.setText(config)
 
     def load_config(self):
         """Load KMonad config from file."""
@@ -392,102 +539,165 @@ class KeyboardLayout(QWidget):
             self.layout.addWidget(row_widget)
 
     def toggle_kmonad(self):
-        """Toggle kmonad on/off."""
-        if self.kmonad_process is None or self.kmonad_process.state() == 0:
-            # Kill any existing kmonad processes first
+        """Toggle KMonad on/off."""
+        if self.kmonad_process is None or self.kmonad_process.state() == QProcess.ProcessState.NotRunning:
             try:
+                # Kill any existing KMonad processes first
                 subprocess.run(['pkill', 'kmonad'], check=False)
-            except Exception as e:
-                self.show_warning(f"Error killing existing kmonad: {e}")
-            
-            # Save current config to temp file
-            config_file = os.path.join(tempfile.gettempdir(), "temp_kmonad.kbd")
-            try:
+                
+                # Save current config to temp file
+                config_file = os.path.join(tempfile.gettempdir(), "temp_kmonad.kbd")
                 with open(config_file, 'w') as f:
                     f.write(self.config_edit.toPlainText())
                 
-                # Start KMonad process
-                self.kmonad_process = QProcess(self)
-                self.kmonad_process.finished.connect(self.on_kmonad_finished)
-                self.kmonad_process.errorOccurred.connect(self.on_kmonad_error)
+                # Verify config file exists and contents
+                if not os.path.exists(config_file):
+                    raise RuntimeError(f"Config file not created: {config_file}")
+                with open(config_file) as f:
+                    self.show_warning(f"Config contents:\n{f.read()}")
+
+                # Check KMonad installation
+                which_result = subprocess.run(['which', 'kmonad'], capture_output=True, text=True)
+                if which_result.returncode != 0:
+                    raise RuntimeError("KMonad not found in PATH")
+                kmonad_path = which_result.stdout.strip()
+                self.show_warning(f"Found KMonad at: {kmonad_path}")
+
+                # Check permissions
+                ls_result = subprocess.run(['ls', '-l', '/dev/uinput'], capture_output=True, text=True)
+                self.show_warning(f"uinput permissions:\n{ls_result.stdout}")
                 
-                # Capture stdout and stderr
+                groups_result = subprocess.run(['groups'], capture_output=True, text=True)
+                self.show_warning(f"Current user groups:\n{groups_result.stdout}")
+
+                # Start KMonad process with full error capture
+                self.kmonad_process = QProcess()
+                self.kmonad_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+                
+                # Connect signals
                 self.kmonad_process.readyReadStandardOutput.connect(self.handle_kmonad_output)
-                self.kmonad_process.readyReadStandardError.connect(self.handle_kmonad_error)
+                self.kmonad_process.errorOccurred.connect(self.handle_kmonad_error)
+                self.kmonad_process.finished.connect(self.handle_kmonad_finished)
                 
-                # Start kmonad with debug output
-                self.kmonad_process.start("kmonad", ["--debug", config_file])
+                # Start KMonad with debug output
+                cmd = [kmonad_path, "-d", config_file]
+                self.show_warning(f"Starting KMonad: {' '.join(cmd)}")
+                self.kmonad_process.start(kmonad_path, ["-d", config_file])
                 
-                if self.kmonad_process.waitForStarted(1000):  # Wait up to 1 second
-                    self.start_button.setText("Stop KMonad")
-                    self.update_tray_status(True)
-                    self.show_warning("KMonad started...", 2000)
-                else:
+                if not self.kmonad_process.waitForStarted(1000):
                     error = self.kmonad_process.errorString()
                     raise RuntimeError(f"Failed to start KMonad: {error}")
                 
+                # Wait a bit and check if process is still running
+                QTimer.singleShot(1000, self.check_kmonad_running)
+                
+                self.start_button.setText("Stop KMonad")
+                self.show_warning("KMonad started, checking status...")
+                
             except Exception as e:
-                self.show_warning(f"Error starting KMonad: {str(e)}")
+                self.show_warning(
+                    f"Error starting KMonad: {str(e)}\n"
+                    "Try running debug to troubleshoot",
+                    30000
+                )
         else:
             try:
+                self.kmonad_process.kill()
                 subprocess.run(['pkill', 'kmonad'], check=False)
-                self.kmonad_process = None
+                self.show_warning("KMonad stopped")
                 self.start_button.setText("Start KMonad")
-                self.update_tray_status(False)
-                self.show_warning("KMonad stopped", 2000)
             except Exception as e:
                 self.show_warning(f"Error stopping KMonad: {str(e)}")
 
+    def check_kmonad_running(self):
+        """Check if KMonad is still running after start."""
+        try:
+            # Check process
+            ps_result = subprocess.run(
+                ['ps', 'aux'], 
+                capture_output=True, 
+                text=True
+            )
+            if "kmonad" not in ps_result.stdout.lower():
+                # KMonad died - check system log
+                journal_result = subprocess.run(
+                    ['journalctl', '-n', '50'], 
+                    capture_output=True, 
+                    text=True
+                )
+                self.show_warning(
+                    "Error: KMonad failed to start\n"
+                    f"System log:\n{journal_result.stdout}\n"
+                    "Common issues:\n"
+                    "1. uinput module not loaded (run 'sudo modprobe uinput')\n"
+                    "2. Permission denied on /dev/uinput\n"
+                    "3. User not in input group\n"
+                    "4. Invalid config syntax\n"
+                    "Try running: kmonad -d /tmp/temp_kmonad.kbd",
+                    0
+                )
+                return
+
+            # Check if device was created
+            ls_result = subprocess.run(
+                ['ls', '-l', '/dev/input/by-id'], 
+                capture_output=True, 
+                text=True
+            )
+            if "kmonad" not in ls_result.stdout.lower():
+                self.show_warning(
+                    "Warning: KMonad running but device not created\n"
+                    "Try typing 'a' - it should output 'b'\n"
+                    "If not working, check permissions and run debug",
+                    0
+                )
+                return
+
+            self.show_warning(
+                "KMonad running and device created\n"
+                "Try typing 'a' - it should output 'b'"
+            )
+
+        except Exception as e:
+            self.show_warning(f"Error checking KMonad: {str(e)}")
+
     def handle_kmonad_output(self):
-        """Handle KMonad stdout."""
+        """Handle KMonad process output."""
         if self.kmonad_process:
             output = bytes(self.kmonad_process.readAllStandardOutput()).decode()
             if output.strip():
-                self.show_warning(f"KMonad: {output.strip()}")
+                self.show_warning(f"KMonad output: {output.strip()}")
 
-    def handle_kmonad_error(self):
-        """Handle KMonad stderr."""
-        if self.kmonad_process:
-            error = bytes(self.kmonad_process.readAllStandardError()).decode()
-            if error.strip():
-                # Show error for 30 seconds
-                self.show_warning(
-                    "KMonad Error:\n" + error.strip() + "\n\n"
-                    "Try running the Setup Wizard again if this persists.",
-                    30000
-                )
+    def handle_kmonad_error(self, error):
+        """Handle KMonad process errors."""
+        error_text = {
+            QProcess.ProcessError.FailedToStart: "Failed to start KMonad",
+            QProcess.ProcessError.Crashed: "KMonad crashed",
+            QProcess.ProcessError.Timedout: "KMonad timed out",
+            QProcess.ProcessError.WriteError: "Failed to write to KMonad",
+            QProcess.ProcessError.ReadError: "Failed to read from KMonad",
+            QProcess.ProcessError.UnknownError: "Unknown KMonad error"
+        }.get(error, f"KMonad error: {error}")
+        
+        self.show_warning(
+            f"Error: {error_text}\n"
+            "Click 'Debug in Terminal' for more details",
+            0  # Don't auto-hide errors
+        )
 
-    def on_kmonad_finished(self, exit_code, exit_status):
+    def handle_kmonad_finished(self, exit_code, exit_status):
         """Handle KMonad process finishing."""
         self.start_button.setText("Start KMonad")
-        self.update_tray_status(False)
-        
         if exit_code != 0:
-            # Get the last error output if available
-            if self.kmonad_process:
-                error = bytes(self.kmonad_process.readAllStandardError()).decode()
-                if error.strip():
-                    # Show error for 30 seconds
-                    self.show_warning(
-                        f"KMonad exited with code {exit_code}\n\n"
-                        f"Error: {error.strip()}\n\n"
-                        "Try running the Setup Wizard if this persists.", 
-                        30000
-                    )
-                else:
-                    self.show_warning(
-                        f"KMonad exited with code {exit_code}\n\n"
-                        "Possible issues:\n"
-                        "• Keyboard device not accessible\n"
-                        "• Invalid device path\n"
-                        "• Config syntax error\n\n"
-                        "Try running the Setup Wizard again.",
-                        30000
-                    )
-
-    def on_kmonad_error(self, error):
-        """Handle KMonad process errors."""
-        self.show_warning(f"KMonad error: {error}")
+            self.show_warning(
+                f"KMonad exited with code {exit_code}\n"
+                "Common issues:\n"
+                "1. Invalid device path\n"
+                "2. Permission denied\n"
+                "3. Config syntax error\n"
+                "Try running debug to troubleshoot",
+                0  # Don't auto-hide errors
+            )
 
     def check_existing_kmonad(self):
         """Check for existing KMonad processes and update UI accordingly."""
@@ -688,8 +898,7 @@ class KeyboardLayout(QWidget):
                     self.kmonad_configs["QWERTY-Colemak"].replace(
                         "DEVICE_ID", 
                         self.device_combo.currentText()
-                    )
-                )
+                    ))
 
     def update_visual_layout(self):
         """Update visual layout with current mapping."""
@@ -706,6 +915,43 @@ class KeyboardLayout(QWidget):
                             if isinstance(key_block, KeyBlock):
                                 key_block.key = key
                                 key_block.setText(key)
+
+    def kill_all_kmonad(self):
+        """Kill all running KMonad processes."""
+        try:
+            subprocess.run(['pkill', 'kmonad'], check=False)
+            self.show_warning("Killed all KMonad processes")
+        except Exception as e:
+            self.show_warning(f"Error killing KMonad: {str(e)}")
+
+    def load_default_config(self):
+        """Load default KMonad config."""
+        device = self.device_combo.currentData()
+        if not device:
+            self.show_warning("No keyboard device selected", 5000)
+            return
+
+        # Simple test config - maps 'a' to 'b' to verify remapping works
+        default_config = f"""(defcfg
+  input  (device-file "{device}")
+  output (uinput-sink "KMonad: Compyutinator")
+  fallthrough true
+  allow-cmd true
+)
+
+(defsrc
+  a
+)
+
+(deflayer default
+  b
+)"""
+        self.config_edit.setText(default_config)
+        self.show_warning(
+            "Loaded test config - 'a' should type as 'b'\n"
+            "Try typing 'a' to test if KMonad is working",
+            0
+        )
 
 class KeyBlock(QWidget):
     """A custom widget representing a keyboard key."""
