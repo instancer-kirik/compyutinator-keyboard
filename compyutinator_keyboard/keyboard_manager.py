@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Optional, Dict, List
+import logging
 
 # Qt imports
 from PyQt6.QtCore import (
@@ -56,11 +57,13 @@ try:
     from .keyboard_layout import KeyboardLayout
     from .midi_keyboard import MIDIKeyboard
     from compyutinator_common import setup_qt_app
+    from compyutinator_transcriber.transcriber import TranscriberWindow
 except ImportError:
     from keyboard_layout import KeyboardLayout
     from midi_keyboard import MIDIKeyboard
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from compyutinator_common import setup_qt_app
+    from compyutinator_transcriber.transcriber import TranscriberWindow
 
 # Add this constant near the top of the file
 KEYBOARD_ICON_SVG = """
@@ -76,6 +79,8 @@ KEYBOARD_ICON_SVG = """
     <rect x="40" y="32" width="6" height="6" rx="1" fill="currentColor"/>
 </svg>
 """
+
+logger = logging.getLogger(__name__)
 
 class KeyboardManager(QMainWindow):
     def __init__(self):
@@ -97,6 +102,10 @@ class KeyboardManager(QMainWindow):
         # Check if setup is needed
         if not self.check_setup():
             self.run_setup()
+
+        # Install event filter to catch key events globally
+        app = QApplication.instance()
+        app.installEventFilter(self)
 
     def check_setup(self) -> bool:
         """Check if setup is needed and run setup wizard if necessary."""
@@ -182,6 +191,23 @@ class KeyboardManager(QMainWindow):
         midi_tab_layout.addStretch()
         
         tab_widget.addTab(midi_tab, "MIDI Keyboard")
+        
+        # Transcriber tab
+        transcriber_tab = QWidget()
+        transcriber_layout = QVBoxLayout(transcriber_tab)
+        
+        # Create transcriber widget with direct model path
+        model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'vosk-model-small-en-us-0.15')
+        if not os.path.exists(model_path):
+            logger.warning(f"Could not find Vosk model at {model_path}")
+            model_path = None
+        
+        self.transcriber = TranscriberWindow(model_path=model_path)
+        # Remove window decorations since it's embedded
+        self.transcriber.setWindowFlags(Qt.WindowType.Widget)
+        transcriber_layout.addWidget(self.transcriber)
+        
+        tab_widget.addTab(transcriber_tab, "Transcriber")
         
         # Create controls
         controls_group = QGroupBox("Controls")
@@ -341,27 +367,33 @@ class KeyboardManager(QMainWindow):
         """Handle MIDI note off event."""
         self.midi_status.setText(f"MIDI: Note {note} Off")
     
-    def keyPressEvent(self, event):
-        """Handle key press events."""
-        if self.midi_keyboard and not event.isAutoRepeat():
-            if self.midi_keyboard.key_press(event.text() or event.key()):
-                event.accept()
-                return
-        super().keyPressEvent(event)
-    
-    def keyReleaseEvent(self, event):
-        """Handle key release events."""
-        if self.midi_keyboard and not event.isAutoRepeat():
-            if self.midi_keyboard.key_release(event.text() or event.key()):
-                event.accept()
-                return
-        super().keyReleaseEvent(event)
+    def eventFilter(self, obj, event):
+        """Handle events even when window doesn't have focus."""
+        if event.type() in (event.Type.KeyPress, event.Type.KeyRelease):
+            if self.midi_keyboard:
+                if event.type() == event.Type.KeyPress and not event.isAutoRepeat():
+                    if self.midi_keyboard.key_press(event.text() or event.key()):
+                        return True
+                elif event.type() == event.Type.KeyRelease and not event.isAutoRepeat():
+                    if self.midi_keyboard.key_release(event.text() or event.key()):
+                        return True
+        return super().eventFilter(obj, event)
     
     def closeEvent(self, event):
         """Handle application close."""
+        # Stop transcription if running
+        if hasattr(self, 'transcriber'):
+            try:
+                self.transcriber.stop_transcription()
+                self.transcriber.close()
+            except:
+                pass
+        
+        # Handle other cleanup
         if self.midi_keyboard:
             self.midi_keyboard.cleanup()
-        super().closeEvent(event)
+        
+        event.accept()
 
     def create_tray_icon(self):
         """Create system tray icon and menu."""
