@@ -4,7 +4,7 @@ Keyboard Layout Widget for visualizing and editing keyboard configurations.
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QVBoxLayout, QComboBox,
-    QPushButton, QTextEdit, QCheckBox, QFileDialog, QSystemTrayIcon, QMenu, QMessageBox
+    QPushButton, QTextEdit, QCheckBox, QFileDialog, QSystemTrayIcon, QMenu, QMessageBox, QSpinBox
 )
 from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve, QMimeData, QTimer
 from PyQt6.QtGui import QPainter, QPen, QColor, QPixmap, QDrag, QIcon, QTextCursor
@@ -20,9 +20,35 @@ class KeyboardLayout(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.layout = QVBoxLayout(self)
-        self.layout.setSpacing(4)
-        self.layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Create main layout (store as instance variable with different name)
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setSpacing(4)
+        self.main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Create controls layout
+        controls_layout = QHBoxLayout()
+        self.main_layout.addLayout(controls_layout)
+        
+        # Add staggered layout toggle
+        self.offset_toggle = QCheckBox("Staggered Layout")
+        self.offset_toggle.setChecked(True)  # Default to staggered
+        controls_layout.addWidget(self.offset_toggle)
+        
+        # Add key size controls
+        key_size_layout = QHBoxLayout()
+        key_size_layout.addWidget(QLabel("Key Size:"))
+        self.key_size_spin = QSpinBox()
+        self.key_size_spin.setRange(30, 100)
+        self.key_size_spin.setValue(50)
+        self.key_size_spin.valueChanged.connect(self.update_key_sizes)
+        key_size_layout.addWidget(self.key_size_spin)
+        controls_layout.addLayout(key_size_layout)
+        
+        # Add config editor
+        self.config_edit = QTextEdit()
+        self.config_edit.setPlaceholderText("Paste your KMonad config here...")
+        self.main_layout.addWidget(self.config_edit)
         
         # Add output box first so it's available for messages
         self.output_box = QTextEdit()
@@ -49,12 +75,7 @@ class KeyboardLayout(QWidget):
         device_layout.addWidget(device_label)
         device_layout.addWidget(self.device_combo)
         device_layout.addWidget(refresh_button)
-        self.layout.addLayout(device_layout)
-        
-        # Add config editor
-        self.config_edit = QTextEdit()
-        self.config_edit.setMinimumHeight(200)
-        self.layout.addWidget(self.config_edit)
+        self.main_layout.addLayout(device_layout)
         
         # Add control buttons
         button_layout = QHBoxLayout()
@@ -77,10 +98,10 @@ class KeyboardLayout(QWidget):
         self.minimize_to_tray.setChecked(True)
         button_layout.addWidget(self.minimize_to_tray)
         
-        self.layout.addLayout(button_layout)
+        self.main_layout.addLayout(button_layout)
         
         # Add output box at bottom
-        self.layout.addWidget(self.output_box)
+        self.main_layout.addWidget(self.output_box)
         
         # Initialize after UI is ready
         self.kmonad_process = None
@@ -101,7 +122,7 @@ class KeyboardLayout(QWidget):
         """)
         self.warning_label.hide()
         # Add warning label to top of layout
-        self.layout.insertWidget(0, self.warning_label)
+        self.main_layout.insertWidget(0, self.warning_label)
         
         # Initialize other attributes
         self.dragging = False
@@ -128,7 +149,7 @@ class KeyboardLayout(QWidget):
         self.layout_combo.addItems(["QWERTY", "Colemak", "Dvorak"])
         self.layout_combo.currentTextChanged.connect(self.change_layout)
         layout_selector.addWidget(self.layout_combo)
-        self.layout.insertLayout(1, layout_selector)
+        self.main_layout.insertLayout(1, layout_selector)
         
         # Now create keyboard layout
         self.create_keyboard_layout()
@@ -536,7 +557,7 @@ read
                 row_layout.addWidget(key_block)
             
             row_layout.addStretch()
-            self.layout.addWidget(row_widget)
+            self.main_layout.addWidget(row_widget)
 
     def toggle_kmonad(self):
         """Toggle KMonad on/off."""
@@ -953,6 +974,41 @@ read
             0
         )
 
+    def spreadRow(self, row_layout):
+        """Spread keys in a row based on staggered layout setting."""
+        is_staggered = self.offset_toggle.isChecked()
+        row_index = self.get_row_index(row_layout)
+        
+        # Calculate offset based on row
+        if is_staggered:
+            offset = row_index * 25  # Staggered offset
+        else:
+            offset = 0  # Aligned layout
+            
+        # Apply offset to first spacer in row
+        if row_layout.count() > 0:
+            first_item = row_layout.itemAt(0)
+            if isinstance(first_item, QSpacerItem):
+                row_layout.removeItem(first_item)
+                row_layout.insertItem(0, QSpacerItem(offset, 0))
+
+    def get_row_index(self, row_layout):
+        """Get the index of a row in the keyboard layout."""
+        parent = row_layout.parent()
+        if parent:
+            main_layout = parent.parent().layout()
+            for i in range(main_layout.count()):
+                if main_layout.itemAt(i).widget() == parent:
+                    return i
+        return 0
+
+    def update_key_sizes(self):
+        """Update the size of all key widgets."""
+        size = self.key_size_spin.value()
+        for row in self.findChildren(QWidget, "keyboard_row"):
+            for key in row.findChildren(KeyBlock):
+                key.setFixedSize(size, size)
+
 class KeyBlock(QWidget):
     """A custom widget representing a keyboard key."""
     
@@ -1122,14 +1178,24 @@ class KeyBlock(QWidget):
                     self.spreadRow(row_layout)
 
     def dragLeaveEvent(self, event):
+        """Handle key block being dragged out."""
         self.is_target = False
         self.drop_side = None
         self.update()
-        # Only reset spacing if we're not in staggered mode
-        parent_row = self.parent()
-        if parent_row and not parent_row.offset_toggle.isChecked():
-            self.resetRow(parent_row.layout())
-
+        
+        # Reset row spacing when key is dragged out
+        keyboard_layout = self.get_keyboard_layout()
+        parent_row = self.get_parent_row()
+        if keyboard_layout and parent_row:
+            if keyboard_layout.offset_toggle.isChecked():
+                # Maintain staggered layout
+                row_index = keyboard_layout.get_row_index(parent_row.layout())
+                offset = row_index * 25
+                self.adjustRowSpacing(parent_row.layout(), offset)
+            else:
+                # Reset to aligned layout
+                self.adjustRowSpacing(parent_row.layout(), 0)
+    
     def dropEvent(self, event):
         """Handle drop events."""
         if event.mimeData().hasText():
@@ -1140,28 +1206,74 @@ class KeyBlock(QWidget):
                 if self.is_placeholder:
                     self.is_placeholder = False
                     self.key = new_key
-                    self.original_key = new_key  # Update original key
+                    self.original_key = new_key
                 else:
                     source.key = self.key
-                    source.original_key = self.key  # Update source original key
+                    source.original_key = self.key
                     self.key = new_key
-                    self.original_key = new_key  # Update target original key
+                    self.original_key = new_key
                 
                 # Reset states
                 self.is_target = False
                 self.drop_side = None
+                source.is_placeholder = False
+                
+                # Update visuals
                 self.update()
                 source.update()
                 
-                # Reset source placeholder state
-                source.is_placeholder = False
-                source.update()
+                # Adjust row spacing after drop
+                keyboard_layout = self.get_keyboard_layout()
+                parent_row = self.get_parent_row()
+                if keyboard_layout and parent_row:
+                    if keyboard_layout.offset_toggle.isChecked():
+                        row_index = keyboard_layout.get_row_index(parent_row.layout())
+                        offset = row_index * 25
+                        self.adjustRowSpacing(parent_row.layout(), offset)
+                    else:
+                        self.adjustRowSpacing(parent_row.layout(), 0)
+                
             event.accept()
-            
-            # Reset row positions
-            parent_row = self.parent()
-            if parent_row:
-                self.resetRow(parent_row.layout())
+    
+    def adjustRowSpacing(self, row_layout, offset):
+        """Adjust spacing of keys in a row."""
+        # Remove existing spacers
+        for i in range(row_layout.count()-1, -1, -1):
+            item = row_layout.itemAt(i)
+            if isinstance(item, QSpacerItem):
+                row_layout.removeItem(item)
+        
+        # Add initial offset spacer
+        if offset > 0:
+            row_layout.insertItem(0, QSpacerItem(offset, 0))
+        
+        # Add spacing between keys
+        key_spacing = 5
+        for i in range(row_layout.count()):
+            if isinstance(row_layout.itemAt(i).widget(), KeyBlock):
+                if i < row_layout.count() - 1:  # Don't add after last key
+                    row_layout.insertItem(i + 1, QSpacerItem(key_spacing, 0))
+        
+        # Add stretch at end
+        row_layout.addStretch()
+    
+    def get_keyboard_layout(self):
+        """Find the KeyboardLayout parent widget."""
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, KeyboardLayout):
+                return parent
+            parent = parent.parent()
+        return None
+    
+    def get_parent_row(self):
+        """Get the parent row widget."""
+        parent = self.parent()
+        while parent:
+            if parent.objectName() == "keyboard_row":
+                return parent
+            parent = parent.parent()
+        return None
 
     def enterEvent(self, event):
         """Handle mouse enter for hover effects."""

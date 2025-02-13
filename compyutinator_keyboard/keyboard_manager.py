@@ -58,12 +58,14 @@ try:
     from .midi_keyboard import MIDIKeyboard
     from compyutinator_common import setup_qt_app
     from compyutinator_transcriber.transcriber import TranscriberWindow
+    from .morse_code import MorseChart, MorseRecognizer
 except ImportError:
-    from keyboard_layout import KeyboardLayout
-    from midi_keyboard import MIDIKeyboard
+    from .keyboard_layout import KeyboardLayout
+    from .midi_keyboard import MIDIKeyboard
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from compyutinator_common import setup_qt_app
     from compyutinator_transcriber.transcriber import TranscriberWindow
+    from .morse_code import MorseChart, MorseRecognizer
 
 # Add this constant near the top of the file
 KEYBOARD_ICON_SVG = """
@@ -208,6 +210,30 @@ class KeyboardManager(QMainWindow):
         transcriber_layout.addWidget(self.transcriber)
         
         tab_widget.addTab(transcriber_tab, "Transcriber")
+        
+        # Morse Code tab
+        morse_tab = QWidget()
+        morse_layout = QVBoxLayout(morse_tab)
+        
+        # Add Morse chart
+        morse_chart = MorseChart()
+        morse_layout.addWidget(morse_chart)
+        
+        # Add Morse recognizer
+        self.morse_recognizer = MorseRecognizer()
+        morse_layout.addWidget(self.morse_recognizer)
+        
+        # Add instructions
+        instructions = QLabel(
+            "Use Space or Enter to input Morse code:\n"
+            "• Short press (< 0.15s) for dot\n"
+            "• Long press (> 0.15s) for dash\n"
+            "• Wait 0.5s for new character\n"
+            "• Wait 1.0s for word space"
+        )
+        morse_layout.addWidget(instructions)
+        
+        tab_widget.addTab(morse_tab, "Morse Code")
         
         # Create controls
         controls_group = QGroupBox("Controls")
@@ -370,6 +396,7 @@ class KeyboardManager(QMainWindow):
     def eventFilter(self, obj, event):
         """Handle events even when window doesn't have focus."""
         if event.type() in (event.Type.KeyPress, event.Type.KeyRelease):
+            # Handle MIDI keyboard events
             if self.midi_keyboard:
                 if event.type() == event.Type.KeyPress and not event.isAutoRepeat():
                     if self.midi_keyboard.key_press(event.text() or event.key()):
@@ -377,6 +404,17 @@ class KeyboardManager(QMainWindow):
                 elif event.type() == event.Type.KeyRelease and not event.isAutoRepeat():
                     if self.midi_keyboard.key_release(event.text() or event.key()):
                         return True
+            
+            # Handle Morse code input
+            if hasattr(self, 'morse_recognizer'):
+                if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return):
+                    if event.type() == event.Type.KeyPress and not event.isAutoRepeat():
+                        self.morse_recognizer.key_down()
+                        return True
+                    elif event.type() == event.Type.KeyRelease and not event.isAutoRepeat():
+                        self.morse_recognizer.key_up()
+                        return True
+                        
         return super().eventFilter(obj, event)
     
     def closeEvent(self, event):

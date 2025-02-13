@@ -18,6 +18,8 @@ dependencies = [
     "tqdm>=4.66.1",
     "python-rtmidi>=1.5.0",
     "mido>=1.3.0",
+    "sounddevice>=0.5.1",
+    "samplerate>=0.2.1",
 ]
 keywords = ["keyboard", "kmonad", "configuration", "transcription", "voice-to-text", "midi", "daw"]
 classifiers = [

@@ -104,28 +104,40 @@ class RealTimeTranscriptionThread(QThread):
     audio_debug = pyqtSignal(str)  # New signal for debug info
 
     def __init__(self, model_path, device_index=None, sample_rate=16000, 
-                 channels=1, format=pyaudio.paFloat32, frames_per_buffer=2048):
+                 channels=1, format=pyaudio.paFloat32, frames_per_buffer=1024):
         super().__init__()
         self.model_path = model_path
         self.running = True
         self.paused = False
         self.device_index = device_index
         
-        # Audio stream reference
-        self.stream = None
-        self.p = None
+        # Vosk requires 16kHz
+        self.vosk_rate = 16000
         
-        # Use recommended settings for Vosk
-        self.model = Model(self.model_path)
-        self.recognizer = KaldiRecognizer(self.model, 16000)
+        # Get device's native rate
+        p = pyaudio.PyAudio()
+        device_info = p.get_device_info_by_index(device_index)
+        self.device_rate = int(device_info.get('defaultSampleRate', 48000))
+        p.terminate()
         
-        # Audio configuration
-        self.sample_rate = 16000  # Force 16kHz for Vosk
-        self.channels = 1  # Force mono
+        # Use device's native rate for capture
+        self.sample_rate = self.device_rate
+        self.channels = channels
         self.format = format
         self.frames_per_buffer = frames_per_buffer
         
-        # Add a buffer to accumulate partial results
+        # Initialize Vosk model
+        self.model = Model(self.model_path)
+        self.recognizer = KaldiRecognizer(self.model, self.vosk_rate)
+        
+        # Initialize resampler if needed
+        self.need_resample = self.device_rate != self.vosk_rate
+        if self.need_resample:
+            import samplerate
+            self.resampler = samplerate.Resampler('sinc_best', channels=1)
+            self.ratio = float(self.vosk_rate) / self.device_rate
+        
+        # Add a buffer for partial results
         self.partial_buffer = ""
         self.last_final_text = ""
         self.min_words = 2  # Minimum words to consider a transcription valid
@@ -160,101 +172,65 @@ class RealTimeTranscriptionThread(QThread):
             p.terminate()
 
     def run(self):
+        """Main processing loop for audio transcription."""
         try:
-            self.p = pyaudio.PyAudio()
-            
-            # Get device info
-            device_info = self.p.get_device_info_by_index(self.device_index)
-            self.audio_debug.emit(f"Using device: {device_info['name']}")
-            
-            # Open stream
-            self.stream = self.p.open(
+            p = pyaudio.PyAudio()
+            stream = p.open(
                 format=self.format,
                 channels=self.channels,
-                rate=self.sample_rate,
+                rate=self.sample_rate,  # Use device's native rate
                 input=True,
                 input_device_index=self.device_index,
                 frames_per_buffer=self.frames_per_buffer,
-                stream_callback=self.audio_callback
+                stream_callback=None
             )
             
-            self.stream.start_stream()
+            print(f"Started audio stream with: rate={self.sample_rate}, channels={self.channels}")
+            stream.start_stream()
             
-            # Keep thread running until stopped
-            while self.running and self.stream.is_active():
-                time.sleep(0.1)
+            while self.running:
+                if not self.paused:
+                    try:
+                        data = stream.read(self.frames_per_buffer, exception_on_overflow=False)
+                        audio_data = np.frombuffer(data, dtype=np.float32)
+                        
+                        # Update level meter
+                        level = np.max(np.abs(audio_data)) * self.level_calibration['boost']
+                        self.audio_level_update.emit(int(level * 100))
+                        
+                        # Resample if needed
+                        if self.need_resample:
+                            audio_data = self.resampler.process(
+                                audio_data, 
+                                ratio=self.ratio
+                            )
+                        
+                        # Convert to bytes for Vosk
+                        vosk_data = (audio_data * 32767).astype(np.int16).tobytes()
+                        
+                        if self.recognizer.AcceptWaveform(vosk_data):
+                            result = json.loads(self.recognizer.Result())
+                            if result.get('text'):
+                                self.transcription_update.emit(result['text'], True)
+                        else:
+                            partial = json.loads(self.recognizer.PartialResult())
+                            if partial.get('partial'):
+                                self.transcription_update.emit(partial['partial'], False)
+                                
+                    except Exception as e:
+                        print(f"Error processing audio: {e}")
+                        self.audio_debug.emit(f"Processing error: {e}")
+            
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
             
         except Exception as e:
-            self.audio_debug.emit(f"Audio error: {e}")
+            print(f"Error in transcription thread: {e}")
+            self.audio_debug.emit(f"Thread error: {e}")
+            
         finally:
-            self.cleanup()
-
-    def audio_callback(self, in_data, frame_count, time_info, status):
-        if not self.running or self.paused:
-            return (None, pyaudio.paComplete)
-        
-        try:
-            # Process audio data
-            audio_data = np.frombuffer(in_data, dtype=np.float32)
-            
-            # Calculate RMS with better scaling
-            audio_data = np.abs(audio_data)  # Use absolute values
-            rms = np.sqrt(np.mean(np.square(audio_data)))
-            
-            # Apply more aggressive scaling for float32
-            if self.format == pyaudio.paFloat32:
-                level = int(rms * 20000 * self.level_calibration['boost'])  # Increase scaling
-            else:
-                level = int(rms * self.level_calibration['boost'])
-            
-            # Clamp to range
-            level = max(self.level_calibration['min'], 
-                       min(level, self.level_calibration['max']))
-            
-            self.audio_level_update.emit(level)
-            
-            # Send to Vosk
-            if self.recognizer.AcceptWaveform(audio_data.tobytes()):
-                result = json.loads(self.recognizer.Result())
-                if result.get("text"):
-                    clean_text = result["text"].strip()
-                    words = clean_text.split()
-                    
-                    # Apply multiple filters
-                    current_time = time.time()
-                    time_since_last_transcription = current_time - self.last_transcription_time
-                    
-                    if (len(words) >= self.min_words and 
-                        clean_text != self.last_final_text and 
-                        time_since_last_transcription > 0.5):  # Prevent rapid repeated transcriptions
-                        
-                        # Optional: Add confidence check if available
-                        if 'result' in result and result['result']:
-                            confidence = sum(word.get('conf', 0) for word in result['result']) / len(result['result'])
-                            if confidence < self.confidence_threshold:
-                                return (None, pyaudio.paContinue)
-                        
-                        self.transcription_update.emit(clean_text, True)
-                        self.last_final_text = clean_text
-                        self.last_transcription_time = current_time
-                        self.partial_buffer = ""
-            else:
-                partial = json.loads(self.recognizer.PartialResult())
-                if partial.get("partial"):
-                    clean_partial = partial["partial"].strip()
-                    partial_words = clean_partial.split()
-                    
-                    if (len(partial_words) >= self.min_words and 
-                        clean_partial != self.partial_buffer):
-                        
-                        self.partial_buffer = clean_partial
-                        self.transcription_update.emit(clean_partial, False)
-            
-            return (in_data, pyaudio.paContinue)
-            
-        except Exception as e:
-            self.audio_debug.emit(f"Processing error: {e}")
-            return (None, pyaudio.paAbort)
+            self.running = False
 
     def cleanup(self):
         """Clean up audio resources."""
@@ -422,12 +398,18 @@ class TranscriberWindow(QMainWindow):
             print("Selected default device")
 
     def toggle_transcription(self):
-        if not hasattr(self, 'transcription_thread') or not self.transcription_thread.running:
-            self.start_transcription()
-        else:
-            self.stop_transcription()
+        """Toggle transcription on/off."""
+        try:
+            if hasattr(self, 'transcription_thread') and self.transcription_thread and self.transcription_thread.running:
+                self.stop_transcription()
+            else:
+                self.start_transcription()
+        except Exception as e:
+            print(f"Error toggling transcription: {e}")
+            self.handle_audio_debug(f"Error: {e}")
 
     def start_transcription(self, device_index=None):
+        """Start transcription with the selected device."""
         try:
             if device_index is None:
                 device_index = self.device_selector.currentData()
@@ -437,10 +419,11 @@ class TranscriberWindow(QMainWindow):
             device_info = p.get_device_info_by_index(device_index)
             print(f"\nStarting transcription with device: {device_info['name']}")
             
-            # Configure for device-specific settings
-            sample_rate = int(device_info.get('defaultSampleRate', 48000))
-            channels = 1  # Force mono for better speech recognition
+            # Force standard sample rate for better compatibility
+            sample_rate = 16000  # Vosk works best with 16kHz
+            channels = 1  # Force mono for speech recognition
             
+            # Create and start new thread
             self.transcription_thread = RealTimeTranscriptionThread(
                 self.model_path,
                 device_index=device_index,
@@ -457,23 +440,18 @@ class TranscriberWindow(QMainWindow):
             
             # Start thread
             self.transcription_thread.start()
-            
-            # print(f"Started transcription thread with:")
-            # print(f"- Sample rate: {sample_rate}")
-            # print(f"- Channels: {channels}")
-            # print(f"- Format: paFloat32")
-            # print(f"- Buffer size: 1024")
-            
             self.transcribe_button.setText("Stop Transcription")
             
         except Exception as e:
             error_msg = str(e)
             print(f"Error starting audio: {error_msg}")
             self.handle_audio_debug(f"Error: {error_msg}")
+            self.transcription_thread = None
+            self.transcribe_button.setText("Start Transcription")
 
     def stop_transcription(self):
         """Stop transcription and clean up resources."""
-        if hasattr(self, 'transcription_thread'):
+        if hasattr(self, 'transcription_thread') and self.transcription_thread:
             try:
                 # Signal thread to stop
                 self.transcription_thread.running = False
@@ -545,14 +523,18 @@ class TranscriberWindow(QMainWindow):
 
     def change_device(self):
         """Handle device change from dropdown."""
-        if hasattr(self, 'transcription_thread'):
-            # Stop current thread
-            self.transcription_thread.running = False
-            self.transcription_thread.wait()
-
-        # Start new thread with selected device
-        device_index = self.device_selector.currentData()
-        self.start_transcription(device_index)
+        try:
+            # Stop current transcription if running
+            if hasattr(self, 'transcription_thread') and self.transcription_thread:
+                self.stop_transcription()
+            
+            # Start new thread with selected device
+            device_index = self.device_selector.currentData()
+            if device_index is not None:
+                self.start_transcription(device_index)
+        except Exception as e:
+            print(f"Error changing device: {e}")
+            self.handle_audio_debug(f"Error changing device: {e}")
 
     def close(self):
         """Clean up resources before closing."""

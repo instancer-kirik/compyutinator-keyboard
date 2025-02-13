@@ -154,6 +154,8 @@ dependencies = [
     { name = "pyqt6" },
     { name = "python-rtmidi" },
     { name = "requests" },
+    { name = "samplerate" },
+    { name = "sounddevice" },
     { name = "tqdm" },
     { name = "vosk" },
 ]
@@ -167,6 +169,8 @@ requires-dist = [
     { name = "pyqt6", specifier = ">=6.4.0" },
     { name = "python-rtmidi", specifier = ">=1.5.0" },
     { name = "requests", specifier = ">=2.31.0" },
+    { name = "samplerate", specifier = ">=0.2.1" },
+    { name = "sounddevice", specifier = ">=0.5.1" },
     { name = "tqdm", specifier = ">=4.66.1" },
     { name = "vosk", specifier = ">=0.3.45" },
 ]
@@ -582,6 +586,38 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d3/13/586c9baa985eae0f718029506b40ca41295d51a546567414b2bcf8ccacef/rubicon_objc-0.5.0.tar.gz", hash = "sha256:18f075649780d95df53d483642068c767d7d2cfbbf075ddef124a44b40b6d92e", size = 173652 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6d/30/5b2407b8762ed882e5732e19c485b9ea2f07d35462615a3212638bab66c2/rubicon_objc-0.5.0-py3-none-any.whl", hash = "sha256:a9c2a605120d6e5be327d3f42a71b60963125987e116f51846757b5e110854fa", size = 62711 },
+]
+
+[[package]]
+name = "samplerate"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/9c/d8978b13b8af2f28fdc425e2893f7419d1d6429da1c6a850be83ad095d4f/samplerate-0.2.1.tar.gz", hash = "sha256:464d3574412024184fb7428ecbaa1b2e207bddf5fbc10a5d9ddc3fc1c7b7ab1e", size = 21494 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/18/e8b7d04cdd63ac9eec969519103deae38ea4c75ea8245f90c9a3c5663d05/samplerate-0.2.1-cp310-cp310-macosx_12_0_x86_64.whl", hash = "sha256:9b392e857cfeda712585d702871eab7169ba2c63209e8d2314fa2196d6127354", size = 1442136 },
+    { url = "https://files.pythonhosted.org/packages/72/d7/5d54efb240a691b233a20f5960661e903e5993fddc8a553f804757c0c6ed/samplerate-0.2.1-cp310-cp310-win_amd64.whl", hash = "sha256:c237959ba0fd391b3293f2905c23f1ae15a096fc987cd776aef380ba426491c6", size = 1440887 },
+    { url = "https://files.pythonhosted.org/packages/74/f7/f6c5d7fe3b85a33b29bbf6868c897600492c5258b4b2d4d49bc2a9fdb9cc/samplerate-0.2.1-cp311-cp311-macosx_12_0_universal2.whl", hash = "sha256:b0e1b5cb08edb19d232bd1ba67632590ed7a579b526ab4bf3983b4f2b2e9acb4", size = 2880717 },
+    { url = "https://files.pythonhosted.org/packages/cd/a5/f9deb72c8ba4f7264eb38cb5756a37c87fd3a685a486b2ca97063207d68e/samplerate-0.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:3ebd447f2040950edc1dac32cb4afed3a74ed37e8e5ffe4775470213f799801f", size = 1440933 },
+    { url = "https://files.pythonhosted.org/packages/be/5e/03eee29d705c82137a869333258228746f66a4a065a5dcce98e6dc1d17ef/samplerate-0.2.1-cp312-cp312-macosx_12_0_universal2.whl", hash = "sha256:69cc7ad887c36294129315a04a7f43837c7ed9caf42db94e9687cf66c9709200", size = 2885578 },
+    { url = "https://files.pythonhosted.org/packages/e9/d0/ac5500843d947a82d7552c098954219ca460199a14dc5ebf72b090a46b42/samplerate-0.2.1-cp312-cp312-win_amd64.whl", hash = "sha256:c7f5e81b24debfa25981e367e3f5d191cf72e32b5c92613139f5ba94e7f18c01", size = 1441712 },
+]
+
+[[package]]
+name = "sounddevice"
+version = "0.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/2d/b04ae180312b81dbb694504bee170eada5372242e186f6298139fd3a0513/sounddevice-0.5.1.tar.gz", hash = "sha256:09ca991daeda8ce4be9ac91e15a9a81c8f81efa6b695a348c9171ea0c16cb041", size = 52896 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/d1/464b5fca3decdd0cfec8c47f7b4161a0b12972453201c1bf03811f367c5e/sounddevice-0.5.1-py3-none-any.whl", hash = "sha256:e2017f182888c3f3c280d9fbac92e5dbddac024a7e3442f6e6116bd79dab8a9c", size = 32276 },
+    { url = "https://files.pythonhosted.org/packages/6f/f6/6703fe7cf3d7b7279040c792aeec6334e7305956aba4a80f23e62c8fdc44/sounddevice-0.5.1-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:d16cb23d92322526a86a9490c427bf8d49e273d9ccc0bd096feecd229cde6031", size = 107916 },
+    { url = "https://files.pythonhosted.org/packages/57/a5/78a5e71f5ec0faedc54f4053775d61407bfbd7d0c18228c7f3d4252fd276/sounddevice-0.5.1-py3-none-win32.whl", hash = "sha256:d84cc6231526e7a08e89beff229c37f762baefe5e0cc2747cbe8e3a565470055", size = 312494 },
+    { url = "https://files.pythonhosted.org/packages/af/9b/15217b04f3b36d30de55fef542389d722de63f1ad81f9c72d8afc98cb6ab/sounddevice-0.5.1-py3-none-win_amd64.whl", hash = "sha256:4313b63f2076552b23ac3e0abd3bcfc0c1c6a696fc356759a13bd113c9df90f1", size = 363634 },
 ]
 
 [[package]]
