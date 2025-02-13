@@ -111,9 +111,6 @@ class RealTimeTranscriptionThread(QThread):
         self.paused = False
         self.device_index = device_index
         
-        # Vosk requires 16kHz
-        self.vosk_rate = 16000
-        
         # Get device's native rate
         p = pyaudio.PyAudio()
         device_info = p.get_device_info_by_index(device_index)
@@ -128,28 +125,15 @@ class RealTimeTranscriptionThread(QThread):
         
         # Initialize Vosk model
         self.model = Model(self.model_path)
-        self.recognizer = KaldiRecognizer(self.model, self.vosk_rate)
+        self.recognizer = KaldiRecognizer(self.model, 16000)  # Vosk always uses 16kHz
         
-        # Initialize resampler if needed
-        self.need_resample = self.device_rate != self.vosk_rate
-        if self.need_resample:
-            import samplerate
-            self.resampler = samplerate.Resampler('sinc_best', channels=1)
-            self.ratio = float(self.vosk_rate) / self.device_rate
+        # Initialize resampling buffer with fixed size
+        self.buffer_size = 8192  # Fixed buffer size
+        self.resample_buffer = np.zeros(self.buffer_size, dtype=np.float32)
+        self.buffer_pos = 0
         
-        # Add a buffer for partial results
-        self.partial_buffer = ""
-        self.last_final_text = ""
-        self.min_words = 2  # Minimum words to consider a transcription valid
-        self.confidence_threshold = 0.7  # Only accept transcriptions above this confidence
-        self.last_transcription_time = time.time()
-        
-        # Adjust calibration for better sensitivity
-        self.level_calibration = {
-            'min': 50,    # Lower minimum
-            'max': 2000,  # Lower maximum
-            'boost': 2.0  # Increase boost
-        }
+        # Level calibration
+        self.level_calibration = {'boost': 2.0}
         
         # Calibrate based on device type
         if device_index is not None:
@@ -171,6 +155,39 @@ class RealTimeTranscriptionThread(QThread):
                 })
             p.terminate()
 
+    def resample(self, audio_data):
+        """Resample audio data to 16kHz using fixed buffer."""
+        if self.device_rate == 16000:
+            return audio_data
+            
+        # Calculate resampling ratio
+        ratio = 16000 / self.device_rate
+        
+        # Add new data to buffer
+        samples_to_add = min(len(audio_data), self.buffer_size - self.buffer_pos)
+        self.resample_buffer[self.buffer_pos:self.buffer_pos + samples_to_add] = audio_data[:samples_to_add]
+        self.buffer_pos += samples_to_add
+        
+        # Check if we have enough data
+        min_samples = int(512 / ratio)  # Minimum samples needed for output
+        if self.buffer_pos < min_samples:
+            return None
+        
+        # Calculate output size
+        output_size = int(self.buffer_pos * ratio)
+        
+        # Resample using linear interpolation
+        x = np.linspace(0, self.buffer_pos - 1, output_size)
+        resampled = np.interp(x, np.arange(self.buffer_pos), self.resample_buffer[:self.buffer_pos])
+        
+        # Keep remaining samples
+        remaining = self.buffer_pos - min_samples
+        if remaining > 0:
+            self.resample_buffer[:remaining] = self.resample_buffer[min_samples:self.buffer_pos]
+        self.buffer_pos = remaining
+        
+        return resampled.astype(np.float32)
+    
     def run(self):
         """Main processing loop for audio transcription."""
         try:
@@ -178,11 +195,10 @@ class RealTimeTranscriptionThread(QThread):
             stream = p.open(
                 format=self.format,
                 channels=self.channels,
-                rate=self.sample_rate,  # Use device's native rate
+                rate=self.sample_rate,
                 input=True,
                 input_device_index=self.device_index,
-                frames_per_buffer=self.frames_per_buffer,
-                stream_callback=None
+                frames_per_buffer=self.frames_per_buffer
             )
             
             print(f"Started audio stream with: rate={self.sample_rate}, channels={self.channels}")
@@ -191,6 +207,7 @@ class RealTimeTranscriptionThread(QThread):
             while self.running:
                 if not self.paused:
                     try:
+                        # Read and convert audio
                         data = stream.read(self.frames_per_buffer, exception_on_overflow=False)
                         audio_data = np.frombuffer(data, dtype=np.float32)
                         
@@ -198,25 +215,21 @@ class RealTimeTranscriptionThread(QThread):
                         level = np.max(np.abs(audio_data)) * self.level_calibration['boost']
                         self.audio_level_update.emit(int(level * 100))
                         
-                        # Resample if needed
-                        if self.need_resample:
-                            audio_data = self.resampler.process(
-                                audio_data, 
-                                ratio=self.ratio
-                            )
-                        
-                        # Convert to bytes for Vosk
-                        vosk_data = (audio_data * 32767).astype(np.int16).tobytes()
-                        
-                        if self.recognizer.AcceptWaveform(vosk_data):
-                            result = json.loads(self.recognizer.Result())
-                            if result.get('text'):
-                                self.transcription_update.emit(result['text'], True)
-                        else:
-                            partial = json.loads(self.recognizer.PartialResult())
-                            if partial.get('partial'):
-                                self.transcription_update.emit(partial['partial'], False)
-                                
+                        # Resample to 16kHz
+                        resampled = self.resample(audio_data)
+                        if resampled is not None:
+                            # Convert to int16 for Vosk
+                            vosk_data = (resampled * 32767).astype(np.int16).tobytes()
+                            
+                            if self.recognizer.AcceptWaveform(vosk_data):
+                                result = json.loads(self.recognizer.Result())
+                                if result.get('text'):
+                                    self.transcription_update.emit(result['text'], True)
+                            else:
+                                partial = json.loads(self.recognizer.PartialResult())
+                                if partial.get('partial'):
+                                    self.transcription_update.emit(partial['partial'], False)
+                                    
                     except Exception as e:
                         print(f"Error processing audio: {e}")
                         self.audio_debug.emit(f"Processing error: {e}")
