@@ -1,7 +1,7 @@
 # Maintainer: instancer-kirik <106033356+instancer-kirik@users.noreply.github.com>
 
 pkgname=compyutinator-tools
-pkgver=0.1.0
+pkgver=0.6.7
 pkgrel=1
 pkgdesc="Compyutinator system tools - Keyboard Manager and Speech Transcriber"
 arch=('any')
