@@ -1021,369 +1021,147 @@ class KeyBlock(QWidget):
         self.original_key = key
         self.is_placeholder = False
         self.is_target = False
-        self.is_neighbor = False
-        self.drop_side = None  # 'left' or 'right' or None
-        self.setFixedSize(50, 50)
-        self.setText(key)
+        self.drop_side = None  # 'left' or 'right'
         self.setAcceptDrops(True)
-        self.setMouseTracking(True)  # Enable mouse tracking for hover
         
-        # Enable animation
+        # Animation for smooth movement
         self.animation = QPropertyAnimation(self, b"pos")
         self.animation.setDuration(150)
-        self.animation.setEasingCurve(QEasingCurve.Type.OutQuad)
-
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        # Set fixed size for consistent layout
+        self.setFixedSize(40, 40)
+    
+    def setText(self, text):
+        """Set the key text."""
+        self.key = text
+        self.original_key = text
+        self.update()
+    
+    def text(self):
+        """Get the key text."""
+        return self.key
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            source = event.source()
+            if isinstance(source, KeyBlock):
+                # Accept drops from any row
+                self.is_target = True
+                self.drop_side = 'left' if event.position().x() < self.width() / 2 else 'right'
+                event.accept()
+                self.update()
+                return
+        event.ignore()
+        self.is_target = False
+        self.drop_side = None
+        self.update()
+    
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            source = event.source()
+            if isinstance(source, KeyBlock):
+                self.is_target = True
+                new_side = 'left' if event.position().x() < self.width() / 2 else 'right'
+                if new_side != self.drop_side:
+                    self.drop_side = new_side
+                    self.update()
+                event.accept()
+                return
+        self.is_target = False
+        self.drop_side = None
+        event.ignore()
+        self.update()
+    
+    def dragLeaveEvent(self, event):
+        self.is_target = False
+        self.drop_side = None
+        self.update()
+    
+    def dropEvent(self, event):
+        if not self.is_target:
+            event.ignore()
+            return
+            
+        source = event.source()
+        if isinstance(source, KeyBlock):
+            # Handle cross-row drops
+            source_row = source.parent()
+            target_row = self.parent()
+            
+            # Get layouts
+            source_layout = source_row.layout()
+            target_layout = target_row.layout()
+            
+            # Get positions
+            source_idx = source_layout.indexOf(source)
+            target_idx = target_layout.indexOf(self)
+            
+            if source_idx >= 0 and target_idx >= 0:
+                # Remove from source row
+                source_layout.removeWidget(source)
+                
+                # Calculate insert position
+                insert_idx = target_idx
+                if self.drop_side == 'right':
+                    insert_idx += 1
+                
+                # Insert into target row
+                target_layout.insertWidget(insert_idx, source)
+                
+                # Update layouts
+                source_layout.update()
+                target_layout.update()
+            
+            self.is_target = False
+            self.drop_side = None
+            self.update()
+            event.accept()
+        else:
+            event.ignore()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Create drag object
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setText(self.key)
+            drag.setMimeData(mime)
+            
+            # Create drag pixmap
+            pixmap = QPixmap(self.size())
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            self.render(painter)
+            painter.end()
+            drag.setPixmap(pixmap)
+            
+            # Start drag
+            drag.exec()
+    
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Set colors based on state
-        if self.is_placeholder:
-            bg_color = QColor("#1a1a1a")
-            text_color = QColor("#404040")
-            border_color = QColor("#2a2a2a")
-        else:
-            bg_color = QColor("#2a2a2a")
-            text_color = QColor("white")
-            border_color = QColor("#3a3a3a")
-            
-            if self.is_target and KeyBlock.is_dragging:
-                bg_color = QColor("#3a5a3a")
-                border_color = QColor("#4a6a4a")
-            elif self.is_target:
-                # Subtle highlight when just hovering
-                bg_color = QColor("#2d2d2d")
-                border_color = QColor("#3d3d3d")
-            elif self.is_neighbor and KeyBlock.is_dragging:
-                bg_color = QColor("#2a3a2a")
-                border_color = QColor("#3a5a3a")
-        
         # Draw background
-        painter.fillRect(self.rect(), bg_color)
+        rect = self.rect().adjusted(2, 2, -2, -2)
         
-        # Draw border with drop indicators
-        pen = QPen(border_color)
-        pen.setWidth(2)
-        painter.setPen(pen)
-        
-        if self.drop_side == 'left':
-            left_pen = QPen(QColor("#90ff90"))
-            left_pen.setWidth(4)
-            painter.setPen(left_pen)
-            painter.drawLine(0, 0, 0, self.height())
-            painter.setPen(pen)
-        elif self.drop_side == 'right':
-            right_pen = QPen(QColor("#90ff90"))
-            right_pen.setWidth(4)
-            painter.setPen(right_pen)
-            painter.drawLine(self.width()-1, 0, self.width()-1, self.height())
-            painter.setPen(pen)
-        
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
-        
-        # Draw text
-        painter.setPen(text_color)
-        font = painter.font()
-        font.setPointSize(10)
-        painter.setFont(font)
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.key)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and not self.is_placeholder:
-            self.dragStartPosition = event.pos()
-            KeyBlock.is_dragging = True
-            KeyBlock.dragged_key = self
-            # Start spreading immediately
-            parent_row = self.parent()
-            if parent_row:
-                self.spreadRow(parent_row.layout())
-            self.update()
-
-    def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.MouseButton.LeftButton) or not KeyBlock.is_dragging:
-            return
-            
-        if (event.pos() - self.dragStartPosition).manhattanLength() < QApplication.startDragDistance():
-            return
-
-        # Start drag
-        drag = QDrag(self)
-        mimeData = QMimeData()
-        mimeData.setText(self.key)
-        drag.setMimeData(mimeData)
-
-        # Create semi-transparent drag pixmap
-        pixmap = QPixmap(self.size())
-        pixmap.fill(Qt.GlobalColor.transparent)
-        self.render(pixmap)
-        painter = QPainter(pixmap)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-        painter.fillRect(pixmap.rect(), QColor(0, 0, 0, 127))
-        painter.end()
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(event.pos())
-
-        # Set placeholder state
-        self.is_placeholder = True
-        self.key = ""
-        self.update()
-
-        # Execute drag
-        result = drag.exec(Qt.DropAction.MoveAction)
-        
-        # Reset states
-        KeyBlock.is_dragging = False
-        KeyBlock.dragged_key = None
-
-        if result == Qt.DropAction.IgnoreAction:
-            self.is_placeholder = False
-            self.key = self.original_key
-            self.update()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasText() and KeyBlock.is_dragging:
-            event.accept()
-            parent_row = self.parent()
-            if parent_row:
-                row_layout = parent_row.layout()
-                self.spreadRow(row_layout)
-                self.is_target = True
-                self.update()
-
-    def dragMoveEvent(self, event):
-        """Handle drag move events."""
-        if event.mimeData().hasText():
-            event.accept()
-            # Update target state
-            self.is_target = True
-            # Use position() instead of pos() for QDragMoveEvent
-            mouse_x = event.position().x()
-            self.drop_side = 'right' if mouse_x > self.width() / 2 else 'left'
-            
-            # Update row spreading based on drop position
-            parent_row = self.parent()
-            if parent_row:
-                row_layout = parent_row.layout()
-                # Clear other targets in row
-                for i in range(row_layout.count() - 1):
-                    key = row_layout.itemAt(i).widget()
-                    if isinstance(key, KeyBlock) and key != self:
-                        key.is_target = False
-                        key.drop_side = None
-                # Update current target
-                self.is_target = True
-                self.update()
-                # Only spread row if we're actually dragging a key
-                if KeyBlock.is_dragging:
-                    self.spreadRow(row_layout)
-
-    def dragLeaveEvent(self, event):
-        """Handle key block being dragged out."""
-        self.is_target = False
-        self.drop_side = None
-        self.update()
-        
-        # Reset row spacing when key is dragged out
-        keyboard_layout = self.get_keyboard_layout()
-        parent_row = self.get_parent_row()
-        if keyboard_layout and parent_row:
-            if keyboard_layout.offset_toggle.isChecked():
-                # Maintain staggered layout
-                row_index = keyboard_layout.get_row_index(parent_row.layout())
-                offset = row_index * 25
-                self.adjustRowSpacing(parent_row.layout(), offset)
+        # Draw key background
+        if self.is_target:
+            # Show drop target
+            bg_color = QColor("#404040")
+            # Draw drop indicators
+            indicator_color = QColor("#50c0ff")
+            if self.drop_side == 'left':
+                painter.fillRect(0, 0, 4, self.height(), indicator_color)
             else:
-                # Reset to aligned layout
-                self.adjustRowSpacing(parent_row.layout(), 0)
-    
-    def dropEvent(self, event):
-        """Handle drop events."""
-        if event.mimeData().hasText():
-            source = event.source()
-            if source != self:
-                # Handle key swap
-                new_key = event.mimeData().text()
-                if self.is_placeholder:
-                    self.is_placeholder = False
-                    self.key = new_key
-                    self.original_key = new_key
-                else:
-                    source.key = self.key
-                    source.original_key = self.key
-                    self.key = new_key
-                    self.original_key = new_key
-                
-                # Reset states
-                self.is_target = False
-                self.drop_side = None
-                source.is_placeholder = False
-                
-                # Update visuals
-                self.update()
-                source.update()
-                
-                # Adjust row spacing after drop
-                keyboard_layout = self.get_keyboard_layout()
-                parent_row = self.get_parent_row()
-                if keyboard_layout and parent_row:
-                    if keyboard_layout.offset_toggle.isChecked():
-                        row_index = keyboard_layout.get_row_index(parent_row.layout())
-                        offset = row_index * 25
-                        self.adjustRowSpacing(parent_row.layout(), offset)
-                    else:
-                        self.adjustRowSpacing(parent_row.layout(), 0)
-                
-            event.accept()
-    
-    def adjustRowSpacing(self, row_layout, offset):
-        """Adjust spacing of keys in a row."""
-        # Remove existing spacers
-        for i in range(row_layout.count()-1, -1, -1):
-            item = row_layout.itemAt(i)
-            if isinstance(item, QSpacerItem):
-                row_layout.removeItem(item)
-        
-        # Add initial offset spacer
-        if offset > 0:
-            row_layout.insertItem(0, QSpacerItem(offset, 0))
-        
-        # Add spacing between keys
-        key_spacing = 5
-        for i in range(row_layout.count()):
-            if isinstance(row_layout.itemAt(i).widget(), KeyBlock):
-                if i < row_layout.count() - 1:  # Don't add after last key
-                    row_layout.insertItem(i + 1, QSpacerItem(key_spacing, 0))
-        
-        # Add stretch at end
-        row_layout.addStretch()
-    
-    def get_keyboard_layout(self):
-        """Find the KeyboardLayout parent widget."""
-        parent = self.parent()
-        while parent:
-            if isinstance(parent, KeyboardLayout):
-                return parent
-            parent = parent.parent()
-        return None
-    
-    def get_parent_row(self):
-        """Get the parent row widget."""
-        parent = self.parent()
-        while parent:
-            if parent.objectName() == "keyboard_row":
-                return parent
-            parent = parent.parent()
-        return None
-
-    def enterEvent(self, event):
-        """Handle mouse enter for hover effects."""
-        if KeyBlock.is_dragging and KeyBlock.dragged_key != self:
-            # Get parent row and spread only if actually dragging
-            parent_row = self.parent()
-            if parent_row:
-                row_layout = parent_row.layout()
-                # If this is same row as source, handle placeholder
-                if KeyBlock.dragged_key and KeyBlock.dragged_key.parent() == parent_row:
-                    KeyBlock.dragged_key.is_placeholder = False
-                    KeyBlock.dragged_key.update()
-                self.spreadRow(row_layout)
-                self.is_target = True
-                self.update()
+                painter.fillRect(self.width() - 4, 0, 4, self.height(), indicator_color)
         else:
-            # Just update appearance without spreading if not dragging
-            self.is_target = True
-            self.update()
-
-    def leaveEvent(self, event):
-        """Handle mouse leave."""
-        parent_row = self.parent()
-        if parent_row and KeyBlock.is_dragging:
-            row_layout = parent_row.layout()
-            self.resetRow(row_layout)
-        self.is_target = False
-        self.drop_side = None
-        self.update()
-
-    def spreadRow(self, row_layout):
-        """Spread keys in row to accommodate dragged key."""
-        # Only spread if actually dragging
-        if not KeyBlock.is_dragging:
-            return
+            # Normal state
+            bg_color = QColor("#2a2a2a")
             
-        spacing = 20  # Spread spacing
-        target_index = row_layout.indexOf(self)
+        painter.fillRect(rect, bg_color)
         
-        # Get current row offset (for staggered layout)
-        row_widget = row_layout.parent()
-        keyboard_layout = row_widget.parent()
-        is_staggered = keyboard_layout.offset_toggle.isChecked()
-        
-        # Get stagger offset if in staggered mode
-        base_offset = 0
-        if is_staggered:
-            row_name = row_widget.property("row_name")
-            base_offset = keyboard_layout.row_offsets.get(row_name, 0)
-        
-        # Calculate positions
-        for i in range(row_layout.count() - 1):
-            key = row_layout.itemAt(i).widget()
-            if isinstance(key, KeyBlock):
-                if key.is_placeholder:
-                    continue
-                
-                # Calculate base position with stagger
-                new_x = base_offset + (i * (key.width() + 2))  # Base position
-                
-                # Add spreading space when dragging
-                if i > target_index:
-                    new_x += spacing  # Make room for dragged key
-                
-                # Move key
-                current_pos = key.pos()
-                if current_pos.x() != new_x:
-                    key.animate_to(QPoint(new_x, current_pos.y()))
-                
-                # Update visual state
-                key.is_target = (i == target_index)
-                key.is_neighbor = abs(i - target_index) == 1
-                key.update()
-
-    def resetRow(self, row_layout):
-        """Reset row to normal spacing."""
-        # Get stagger offset
-        row_widget = row_layout.parent()
-        keyboard_layout = row_widget.parent()
-        is_staggered = keyboard_layout.offset_toggle.isChecked()
-        
-        base_offset = 0
-        if is_staggered:
-            row_name = row_widget.property("row_name")
-            base_offset = keyboard_layout.row_offsets.get(row_name, 0)
-        
-        normal_spacing = 2  # Normal spacing between keys
-        for i in range(row_layout.count() - 1):
-            key = row_layout.itemAt(i).widget()
-            if isinstance(key, KeyBlock):
-                # Reset to original position with stagger
-                new_x = base_offset + (i * (key.width() + normal_spacing))
-                current_pos = key.pos()
-                if current_pos.x() != new_x:
-                    key.animate_to(QPoint(new_x, current_pos.y()))
-                # Reset visual state
-                key.is_neighbor = False
-                key.update()
-
-    def setText(self, text):
-        """Set the text of the key block."""
-        self.key = text
-        
-
-    def animate_to(self, new_pos):
-        """Animate key block to new position."""
-        if self.pos() == new_pos:
-            return
-        
-        self.animation.stop()
-        self.animation.setStartValue(self.pos())
-        self.animation.setEndValue(new_pos)
-        self.animation.start()
+        # Draw key text
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.key)

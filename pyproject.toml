@@ -21,6 +21,7 @@ dependencies = [
     "sounddevice>=0.5.1",
     "samplerate>=0.2.1",
     "scipy>=1.15.1",
+    "assemblyai>=0.37.0",
 ]
 keywords = ["keyboard", "kmonad", "configuration", "transcription", "voice-to-text", "midi", "daw"]
 classifiers = [

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from vosk import Model, KaldiRecognizer
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QLabel, 
-                            QApplication, QTextEdit, QComboBox, QPushButton, QCheckBox, QSystemTrayIcon, QMenu)
+                            QApplication, QTextEdit, QComboBox, QPushButton, QCheckBox, QSystemTrayIcon, QMenu, QHBoxLayout, QLineEdit)
 from PyQt6.QtCore import pyqtSignal, QThread, Qt, QTimer
 from PyQt6.QtGui import QPainter, QTextCursor, QColor, QIcon
 import numpy as np
@@ -15,6 +15,8 @@ import pyautogui
 import time
 from PyQt6 import QtCore  # Added missing import
 from compyutinator_common import setup_qt_app
+import asyncio
+from compyutinator_transcriber.backends import VoskBackend, AssemblyAIBackend
 
 try:
     import tkinter
@@ -32,18 +34,18 @@ class AudioLevelWidget(QWidget):
         super().__init__(parent)
         self.level = 0
         self.peak_level = 0
-        self.peak_decay = 0.05
+        self.peak_decay = 0.02  # Faster decay
         self.setMinimumHeight(20)
         self.setMaximumHeight(20)
         
-        # Adjust calibration values for better sensitivity
-        self.min_threshold = 50   # Lower minimum threshold
-        self.max_threshold = 2000 # Lower maximum threshold
+        # Better calibration values
+        self.min_threshold = 1    # Lower minimum threshold
+        self.max_threshold = 100  # Upper threshold
         
         # Start update timer for smooth decay
-        self.update_timer = QtCore.QTimer(self)
+        self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.decay_peak)
-        self.update_timer.start(50)  # Update every 50ms
+        self.update_timer.start(16)  # ~60fps update rate
     
     def decay_peak(self):
         """Decay peak level over time"""
@@ -53,15 +55,10 @@ class AudioLevelWidget(QWidget):
     
     def setLevel(self, level):
         """Set current audio level and update peak."""
-        # More sensitive normalization
-        raw_level = max(0, level - self.min_threshold)
-        normalized = min(1.0, (raw_level / (self.max_threshold - self.min_threshold)) ** 0.5)  # Square root for better low-level response
-        self.level = normalized
-        
-        # Update peak level
-        if normalized > self.peak_level:
-            self.peak_level = normalized
-        
+        # More responsive level handling
+        self.level = min(100, max(0, level)) / 100.0
+        if self.level > self.peak_level:
+            self.peak_level = self.level
         self.update()
     
     def paintEvent(self, event):
@@ -103,75 +100,37 @@ class RealTimeTranscriptionThread(QThread):
     audio_level_update = pyqtSignal(int)
     audio_debug = pyqtSignal(str)  # New signal for debug info
 
-    def __init__(self, model_path, device_index=None, sample_rate=16000, 
+    def __init__(self, model_path, backend="vosk", api_key=None, 
+                 device_index=None, sample_rate=16000, 
                  channels=1, format=pyaudio.paFloat32, frames_per_buffer=1024):
         super().__init__()
-        self.model_path = model_path
         self.running = True
         self.paused = False
         self.device_index = device_index
         
-        # Initialize Vosk model with better params
-        self.model = Model(self.model_path)
-        self.recognizer = KaldiRecognizer(self.model, 16000)
-        self.recognizer.SetWords(True)  # Enable word timing
-        self.recognizer.SetMaxAlternatives(1)  # Reduce alternatives for better accuracy
+        # Initialize backend
+        if backend == "assemblyai" and api_key:
+            self.backend = AssemblyAIBackend(api_key, sample_rate=sample_rate)
+        else:
+            self.backend = VoskBackend(model_path, sample_rate=sample_rate)
         
         # Audio setup
         self.format = format
-        self.channels = channels
-        self.frames_per_buffer = 2048  # Larger buffer for better recognition
+        self.channels = 1
+        self.frames_per_buffer = 2048
+        self.device_rate = self._get_device_rate()
         
-        # Get device's native rate
-        p = pyaudio.PyAudio()
-        device_info = p.get_device_info_by_index(device_index)
-        self.device_rate = int(device_info.get('defaultSampleRate', 48000))
-        p.terminate()
-        
-        # Level calibration
-        self.level_calibration = {'boost': 2.0}
-        
-        # Audio buffer with fixed size
-        self.buffer_size = 8192  # Larger fixed buffer
+        # Buffer setup
+        self.buffer_size = int(self.device_rate * 0.2)
         self.audio_buffer = np.zeros(self.buffer_size, dtype=np.float32)
         self.buffer_pos = 0
         
-        # Transcription state
-        self.last_text = ""
-        self.silence_frames = 0
-        self.min_silence_frames = 10  # Minimum silence frames before processing
-        
-    def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Handle incoming audio data."""
-        if status:
-            print(f"Stream status: {status}")
-        
-        if not self.paused:
-            # Convert to numpy array
-            audio_data = np.frombuffer(in_data, dtype=np.float32)
-            
-            # Calculate level and detect silence
-            level = np.max(np.abs(audio_data))
-            is_silence = level < 0.01
-            
-            if is_silence:
-                self.silence_frames += 1
-            else:
-                self.silence_frames = 0
-            
-            # Update level meter
-            self.audio_level_update.emit(int(level * 100))
-            
-            # Add to circular buffer
-            samples_to_write = min(len(audio_data), self.buffer_size - self.buffer_pos)
-            self.audio_buffer[self.buffer_pos:self.buffer_pos + samples_to_write] = \
-                audio_data[:samples_to_write]
-            self.buffer_pos = (self.buffer_pos + samples_to_write) % self.buffer_size
-        
-        return (None, pyaudio.paContinue)
+        # Create event loop for async operations
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
     
     def run(self):
-        """Main processing loop for audio transcription."""
+        """Main processing loop."""
         try:
             p = pyaudio.PyAudio()
             stream = p.open(
@@ -180,41 +139,26 @@ class RealTimeTranscriptionThread(QThread):
                 rate=self.device_rate,
                 input=True,
                 input_device_index=self.device_index,
-                frames_per_buffer=self.frames_per_buffer,
-                stream_callback=self._audio_callback
+                frames_per_buffer=self.frames_per_buffer
             )
             
-            print(f"Started audio stream with: rate={self.device_rate}, channels={self.channels}")
-            stream.start_stream()
-            
             while self.running:
-                # Process after silence or buffer full
-                if self.silence_frames >= self.min_silence_frames or self.buffer_pos >= self.buffer_size - 1024:
-                    # Get contiguous buffer
-                    if self.buffer_pos > 0:
-                        audio_data = np.concatenate([
-                            self.audio_buffer[self.buffer_pos:],
-                            self.audio_buffer[:self.buffer_pos]
-                        ])
-                    else:
-                        audio_data = self.audio_buffer.copy()
+                if not self.paused:
+                    # Read and process audio
+                    data = stream.read(self.frames_per_buffer, exception_on_overflow=False)
+                    audio_data = np.frombuffer(data, dtype=np.float32)
                     
-                    # Resample
-                    resampled = self._resample(audio_data)
-                    if resampled is not None:
-                        # Convert to int16 for Vosk
-                        vosk_data = (resampled * 32767).astype(np.int16).tobytes()
-                        
-                        if self.recognizer.AcceptWaveform(vosk_data):
-                            result = json.loads(self.recognizer.Result())
-                            text = result.get('text', '').strip()
-                            if text and text != self.last_text:
-                                self.transcription_update.emit(text, True)
-                                self.last_text = text
+                    # Update level meter
+                    level = np.max(np.abs(audio_data))
+                    self.audio_level_update.emit(int(level * 100))
                     
-                    # Reset buffer
-                    self.buffer_pos = 0
-                    self.audio_buffer.fill(0)
+                    # Process through backend
+                    text, is_final = self.loop.run_until_complete(
+                        self.backend.process_audio(audio_data)
+                    )
+                    
+                    if text:
+                        self.transcription_update.emit(text, is_final)
                 
                 self.msleep(10)
             
@@ -225,53 +169,20 @@ class RealTimeTranscriptionThread(QThread):
         except Exception as e:
             print(f"Error in transcription thread: {e}")
             self.audio_debug.emit(f"Thread error: {e}")
-
-    def _resample(self, data):
-        """Simple linear resampling."""
-        if len(data) == 0:
-            return None
-            
-        # Calculate resampling ratio
-        ratio = 16000 / self.device_rate
-        target_length = int(len(data) * ratio)
         
-        # Create evenly spaced indices
-        orig_indices = np.arange(len(data))
-        new_indices = np.linspace(0, len(data) - 1, target_length)
-        
-        # Linear interpolation
-        resampled = np.interp(new_indices, orig_indices, data)
-        
-        return resampled
+        finally:
+            self.backend.cleanup()
 
-    def cleanup(self):
-        """Clean up audio resources."""
-        try:
-            if hasattr(self, 'stream') and self.stream:
-                self.stream.stop_stream()
-                self.stream.close()
-                self.stream = None
-            
-            if hasattr(self, 'p') and self.p:
-                self.p.terminate()
-                self.p = None
-                
-        except Exception as e:
-            self.audio_debug.emit(f"Cleanup error: {e}")
-
-    def stop(self):
-        """Stop the transcription thread."""
-        self.running = False
-        self.cleanup()
-
-    def pause(self):
-        self.paused = True
-
-    def resume(self):
-        self.paused = False
+    def _get_device_rate(self):
+        """Get the device's native sample rate."""
+        p = pyaudio.PyAudio()
+        device_info = p.get_device_info_by_index(self.device_index)
+        rate = int(device_info.get('defaultSampleRate', 48000))
+        p.terminate()
+        return rate
 
 class TranscriberWindow(QMainWindow):
-    def __init__(self, model_path=None):
+    def __init__(self, model_path=None, assemblyai_key=None):
         super().__init__()
         if model_path is None:
             model_path = find_vosk_model()  # Use the direct function instead of model manager
@@ -334,6 +245,22 @@ class TranscriberWindow(QMainWindow):
         layout.addWidget(QLabel("Select Audio Input Device:"))
         layout.addWidget(self.device_selector)
         
+        # Add backend selection
+        backend_layout = QHBoxLayout()
+        self.backend_selector = QComboBox()
+        self.backend_selector.addItems(["Vosk", "AssemblyAI"])
+        backend_layout.addWidget(QLabel("Backend:"))
+        backend_layout.addWidget(self.backend_selector)
+        
+        # Add API key input for AssemblyAI
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("AssemblyAI API Key")
+        self.api_key_input.setText(assemblyai_key or "")
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        backend_layout.addWidget(self.api_key_input)
+        
+        layout.addLayout(backend_layout)
+        
         # Create buttons
         self.transcribe_button = QPushButton("Start Transcription")
         self.transcribe_button.clicked.connect(self.toggle_transcription)
@@ -365,71 +292,73 @@ class TranscriberWindow(QMainWindow):
         # Add status bar
         self.statusBar().showMessage("Ready")
         
-        # Add system tray icon with enhanced menu
-        self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon.fromTheme("audio-input-microphone"))
-        self.tray_icon.setToolTip("Transcriber")
-        
-        # Create enhanced tray menu
-        tray_menu = QMenu()
+        # Store menus as instance variables
+        self.tray_menu = QMenu()
+        self.typing_menu = QMenu("Voice Typing")
+        self.device_menu = QMenu("Input Device")
         
         # Transcription toggle
-        self.toggle_action = tray_menu.addAction("Start Transcription")
+        self.toggle_action = self.tray_menu.addAction("Start Transcription")
         self.toggle_action.triggered.connect(self.toggle_transcription)
         
-        tray_menu.addSeparator()
+        self.tray_menu.addSeparator()
         
-        # Voice typing submenu
-        typing_menu = QMenu("Voice Typing")
-        
-        # Enable/disable voice typing
-        self.typing_action = typing_menu.addAction("Type at Cursor")
+        # Voice typing menu
+        self.typing_action = self.typing_menu.addAction("Type at Cursor")
         self.typing_action.setCheckable(True)
         self.typing_action.setChecked(self.type_at_cursor)
         self.typing_action.triggered.connect(self.toggle_cursor_typing)
         
-        # Word threshold setting
-        threshold_menu = typing_menu.addMenu("Min Words")
+        # Word threshold submenu
+        self.threshold_menu = self.typing_menu.addMenu("Min Words")
+        self.threshold_actions = {}
         for words in [1, 2, 3, 4, 5]:
-            action = threshold_menu.addAction(str(words))
+            action = self.threshold_menu.addAction(str(words))
             action.setCheckable(True)
             action.setChecked(self.typing_threshold == words)
             action.triggered.connect(lambda checked, w=words: self.set_word_threshold(w))
+            self.threshold_actions[words] = action
         
-        # Cooldown setting
-        cooldown_menu = typing_menu.addMenu("Cooldown")
+        # Cooldown submenu
+        self.cooldown_menu = self.typing_menu.addMenu("Cooldown")
+        self.cooldown_actions = {}
         for delay in [0.2, 0.5, 1.0, 1.5]:
-            action = cooldown_menu.addAction(f"{delay}s")
+            action = self.cooldown_menu.addAction(f"{delay}s")
             action.setCheckable(True)
             action.setChecked(self.typing_cooldown == delay)
             action.triggered.connect(lambda checked, d=delay: self.set_typing_cooldown(d))
+            self.cooldown_actions[delay] = action
         
-        tray_menu.addMenu(typing_menu)
+        self.tray_menu.addMenu(self.typing_menu)
         
-        # Device selection submenu
-        device_menu = tray_menu.addMenu("Input Device")
+        # Device menu
         self.device_actions = {}  # Store device actions
-        self.update_device_menu(device_menu)
+        self.update_device_menu()
+        self.tray_menu.addMenu(self.device_menu)
         
-        tray_menu.addSeparator()
+        self.tray_menu.addSeparator()
         
         # Show/hide window
-        self.show_action = tray_menu.addAction("Show Window")
+        self.show_action = self.tray_menu.addAction("Show Window")
         self.show_action.triggered.connect(self.toggle_window)
         
-        tray_menu.addSeparator()
+        self.tray_menu.addSeparator()
         
         # Quit action
-        quit_action = tray_menu.addAction("Quit")
-        quit_action.triggered.connect(self.close)
+        self.quit_action = self.tray_menu.addAction("Quit")
+        self.quit_action.triggered.connect(self.close)
         
-        self.tray_icon.setContextMenu(tray_menu)
+        # Set up tray icon
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon.fromTheme("audio-input-microphone"))
+        self.tray_icon.setToolTip("Transcriber")
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.show()
         
         # Update menu state timer
         self.menu_update_timer = QTimer()
         self.menu_update_timer.timeout.connect(self.update_menu_state)
-        self.menu_update_timer.start(1000)  # Update every second
+        self.menu_update_timer.start(1000)
 
     def toggle_cursor_typing(self, state):
         self.type_at_cursor = state == Qt.CheckState.Checked.value
@@ -496,40 +425,27 @@ class TranscriberWindow(QMainWindow):
             if device_index is None:
                 device_index = self.device_selector.currentData()
             
-            # Get detailed device info
-            p = pyaudio.PyAudio()
-            device_info = p.get_device_info_by_index(device_index)
-            print(f"\nStarting transcription with device: {device_info['name']}")
+            backend = self.backend_selector.currentText().lower()
+            api_key = self.api_key_input.text() if backend == "assemblyai" else None
             
-            # Force standard sample rate for better compatibility
-            sample_rate = 16000  # Vosk works best with 16kHz
-            channels = 1  # Force mono for speech recognition
-            
-            # Create and start new thread
             self.transcription_thread = RealTimeTranscriptionThread(
-                self.model_path,
-                device_index=device_index,
-                sample_rate=sample_rate,
-                channels=channels,
-                format=pyaudio.paFloat32,
-                frames_per_buffer=1024
+                model_path=self.model_path,
+                backend=backend,
+                api_key=api_key,
+                device_index=device_index
             )
             
-            # Connect signals
+            # Connect signals and start
             self.transcription_thread.audio_debug.connect(self.handle_audio_debug)
             self.transcription_thread.transcription_update.connect(self.update_transcription)
             self.transcription_thread.audio_level_update.connect(self.audio_level.setLevel)
             
-            # Start thread
             self.transcription_thread.start()
             self.transcribe_button.setText("Stop Transcription")
             
         except Exception as e:
-            error_msg = str(e)
-            print(f"Error starting audio: {error_msg}")
-            self.handle_audio_debug(f"Error: {error_msg}")
-            self.transcription_thread = None
-            self.transcribe_button.setText("Start Transcription")
+            print(f"Error starting transcription: {e}")
+            self.handle_audio_debug(f"Error: {e}")
 
     def stop_transcription(self):
         """Stop transcription and clean up resources."""
@@ -566,24 +482,28 @@ class TranscriberWindow(QMainWindow):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         
         if is_final:
-            cursor.insertText(text + "\n")
-            self.statusBar().showMessage(f"Transcribed: {text}")
-            
-            # Type at cursor if enabled and enough time has passed
-            if (self.type_at_cursor and 
-                len(text.split()) >= self.typing_threshold and
-                text != self.last_typed_text and
-                current_time - self.last_type_time > self.typing_cooldown):
+            # Only add if text is meaningful
+            if len(text.split()) >= 1:
+                cursor.insertText(text + "\n")
+                self.statusBar().showMessage(f"Transcribed: {text}")
                 
-                try:
-                    pyautogui.write(text + " ")
-                    self.last_typed_text = text
-                    self.last_type_time = current_time
-                except Exception as e:
-                    print(f"Typing error: {e}")
+                # Type at cursor if enabled
+                if (self.type_at_cursor and 
+                    len(text.split()) >= self.typing_threshold and
+                    text != self.last_typed_text and
+                    current_time - self.last_type_time > self.typing_cooldown):
+                    
+                    try:
+                        # Add space after text
+                        pyautogui.write(text + " ")
+                        self.last_typed_text = text
+                        self.last_type_time = current_time
+                    except Exception as e:
+                        print(f"Typing error: {e}")
         else:
             # Show partial text in status bar
-            self.statusBar().showMessage(f"Hearing: {text}")
+            if text.strip():
+                self.statusBar().showMessage(f"Hearing: {text}")
 
     def clear_debug_text(self):
         self.debug_text.clear()
@@ -613,9 +533,9 @@ class TranscriberWindow(QMainWindow):
         self.stop_transcription()
         super().close()
 
-    def update_device_menu(self, menu):
+    def update_device_menu(self):
         """Update the device selection menu."""
-        menu.clear()
+        self.device_menu.clear()
         self.device_actions.clear()
         
         p = pyaudio.PyAudio()
@@ -624,7 +544,7 @@ class TranscriberWindow(QMainWindow):
         for i in range(p.get_device_count()):
             device_info = p.get_device_info_by_index(i)
             if device_info['maxInputChannels'] > 0:
-                action = menu.addAction(device_info['name'])
+                action = self.device_menu.addAction(device_info['name'])
                 action.setCheckable(True)
                 action.setChecked(i == current_device)
                 action.triggered.connect(lambda checked, idx=i: self.select_device(idx))
@@ -659,17 +579,29 @@ class TranscriberWindow(QMainWindow):
     
     def update_menu_state(self):
         """Update menu checkmarks and text."""
-        # Update transcription toggle text
-        is_running = hasattr(self, 'transcription_thread') and self.transcription_thread
-        self.toggle_action.setText("Stop Transcription" if is_running else "Start Transcription")
-        
-        # Update typing action
-        self.typing_action.setChecked(self.type_at_cursor)
-        
-        # Update device selection
-        current_device = self.device_selector.currentData()
-        for idx, action in self.device_actions.items():
-            action.setChecked(idx == current_device)
+        try:
+            # Update transcription toggle text
+            is_running = hasattr(self, 'transcription_thread') and self.transcription_thread
+            self.toggle_action.setText("Stop Transcription" if is_running else "Start Transcription")
+            
+            # Update typing action
+            self.typing_action.setChecked(self.type_at_cursor)
+            
+            # Update threshold actions
+            for words, action in self.threshold_actions.items():
+                action.setChecked(self.typing_threshold == words)
+            
+            # Update cooldown actions
+            for delay, action in self.cooldown_actions.items():
+                action.setChecked(self.typing_cooldown == delay)
+            
+            # Update device selection
+            current_device = self.device_selector.currentData()
+            for idx, action in self.device_actions.items():
+                action.setChecked(idx == current_device)
+                
+        except RuntimeError as e:
+            print(f"Menu update error (can be ignored): {e}")
 
 def find_vosk_model():
     """Find the Vosk model in common locations"""
